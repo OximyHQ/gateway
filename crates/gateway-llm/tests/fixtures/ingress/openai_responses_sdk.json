@@ -1,0 +1,10 @@
+{
+  "model": "gpt-4o",
+  "instructions": "Answer concisely.",
+  "input": [
+    { "role": "user", "content": [{ "type": "input_text", "text": "What is 2+2?" }] }
+  ],
+  "max_output_tokens": 256,
+  "reasoning": { "effort": "low" },
+  "stream": false
+}

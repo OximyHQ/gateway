@@ -1,0 +1,13 @@
+{
+  "model": "claude-3-5-sonnet-20241022",
+  "max_tokens": 4096,
+  "system": "You are Claude Code.",
+  "messages": [
+    { "role": "user", "content": [{ "type": "text", "text": "List the files." }] }
+  ],
+  "tools": [
+    { "name": "list_files", "description": "List files in a dir.", "input_schema": { "type": "object", "properties": { "dir": { "type": "string" } } } }
+  ],
+  "tool_choice": { "type": "auto" },
+  "stream": true
+}

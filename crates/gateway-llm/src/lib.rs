@@ -18,6 +18,7 @@ pub mod resp;
 pub mod sse;
 pub mod stream;
 pub mod toolcall;
+pub mod translate;
 pub mod transports;
 
 pub use message::{ContentPart, ImageSource, Message, Role};
@@ -27,3 +28,7 @@ pub use resp::{ChatResponse, FinishReason};
 pub use sse::{SseDecoder, SseEvent};
 pub use stream::{StreamDelta, ToolCallDelta};
 pub use toolcall::{ToolCall, ToolChoice, ToolDef};
+pub use translate::{
+    Dialect, IngressError, ProviderFamily, StructuredOutputPlan, ToolCallAggregator, Translated,
+    Warning,
+};
