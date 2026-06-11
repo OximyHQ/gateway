@@ -26,3 +26,4 @@
 # Dashboard build artifacts (SPA → embedded assets)
 crates/gateway-dash/web/node_modules
 crates/gateway-dash/web/dist
+.gstack/

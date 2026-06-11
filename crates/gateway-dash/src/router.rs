@@ -84,9 +84,10 @@ mod tests {
         let body = to_bytes(res.into_body(), 1 << 20).await.unwrap();
         let html = String::from_utf8_lossy(&body);
         assert!(html.contains("Oximy Gateway"), "must contain brand name");
-        assert!(html.contains("Models"), "must contain Models tab");
-        assert!(html.contains("Playground"), "must contain Playground tab");
-        assert!(html.contains("Metrics"), "must contain Metrics tab");
+        assert!(html.contains("Overview"), "must contain Overview view");
+        assert!(html.contains("Models"), "must contain Models view");
+        assert!(html.contains("Keys"), "must contain Keys view");
+        assert!(html.contains("Playground"), "must contain Playground view");
     }
 
     #[tokio::test]
