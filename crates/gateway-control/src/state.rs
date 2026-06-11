@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use gateway_guard::GuardChain;
+use gateway_mcp::Federation;
 use gateway_route::Route;
 use gateway_spine::{
     AuditSink, BudgetLedger, Clock, MemoryAudit, ModelRegistry, RateLimiter, SystemClock,
@@ -40,6 +41,10 @@ pub struct AppState<C: Clock = SystemClock> {
     /// [`AppState::set_route`].
     pub routes: RwLock<HashMap<String, Route>>,
     pub audit: Arc<dyn AuditSink>,
+    /// The MCP federation behind the authenticated `POST /mcp` endpoint. Shares
+    /// the same `audit` sink so tool-call events land on the one spine. Built
+    /// empty (zero upstream servers) — the binary registers servers from config.
+    pub federation: Arc<Federation>,
     pub clock: Arc<C>,
     /// Non-blocking telemetry sink — `try_send` only, never blocks a request.
     pub telemetry: TelemetrySink,
@@ -95,6 +100,9 @@ impl<C: Clock> AppState<C> {
     ) -> Self {
         // Arc<C>: Clock via the blanket impl in gateway-spine, so RateLimiter<Arc<C>> works.
         let limiter = Arc::new(RateLimiter::new(clock.clone()));
+        // The federation shares the same audit sink so MCP tool calls and LLM
+        // requests audit onto one spine.
+        let federation = Arc::new(Federation::new(Arc::clone(&audit)));
         Self {
             registry: RwLock::new(ModelRegistry::new()),
             ledger: Arc::new(BudgetLedger::new()),
@@ -104,6 +112,7 @@ impl<C: Clock> AppState<C> {
             guard,
             routes: RwLock::new(HashMap::new()),
             audit,
+            federation,
             clock,
             telemetry,
             metrics,

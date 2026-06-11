@@ -43,6 +43,8 @@ pub fn router<C: Clock + 'static>(state: Arc<AppState<C>>) -> Router {
         .route("/v1/messages", post(chat_completions::<C>))
         .route("/v1/embeddings", post(embeddings::<C>))
         .route("/v1/models", get(models::<C>))
+        // Authenticated MCP gateway (JSON-RPC 2.0 over the federation).
+        .route("/mcp", post(crate::mcp::mcp_handler::<C>))
         // Explicit 404 for any other /v1/* path so the SPA fallback never
         // intercepts an API miss and falsely returns 200 with HTML.
         .route("/v1/{*rest}", get(v1_not_found).post(v1_not_found))

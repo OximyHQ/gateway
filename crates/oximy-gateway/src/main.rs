@@ -309,6 +309,16 @@ async fn run_up_async(args: UpArgs) -> anyhow::Result<()> {
         }
     }
 
+    // ── 6c. Optional upstream MCP servers from OXIMY_MCP_SERVERS ──────────────
+    // JSON array, e.g. [{"name":"docs","url":"https://mcp.example.com/mcp"},
+    //   {"name":"local","command":"my-mcp-server","args":["--flag"]}]
+    // Absent/empty → the /mcp endpoint works but lists zero tools.
+    if let Ok(raw) = std::env::var("OXIMY_MCP_SERVERS")
+        && !raw.trim().is_empty()
+    {
+        register_mcp_servers(&state, &raw).await;
+    }
+
     // ── 6. Build the app router: API + dashboard (mounted last) ───────────────
     let api = gateway_control::router(state);
     let app = api.merge(gateway_dash::dash_router());
@@ -341,6 +351,73 @@ async fn run_up_async(args: UpArgs) -> anyhow::Result<()> {
 
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// Parse `OXIMY_MCP_SERVERS` (JSON array) and register + refresh each upstream
+/// MCP server on the federation. Failures are logged and skipped — a bad server
+/// must never stop the gateway from booting.
+async fn register_mcp_servers<C: gateway_spine::Clock + 'static>(
+    state: &gateway_control::state::AppState<C>,
+    raw: &str,
+) {
+    use gateway_mcp::{HttpTransport, McpServer, StdioTransport};
+
+    #[derive(serde::Deserialize)]
+    struct McpServerCfg {
+        name: String,
+        /// HTTP streamable endpoint (mutually exclusive with `command`).
+        url: Option<String>,
+        /// stdio child command (mutually exclusive with `url`).
+        command: Option<String>,
+        #[serde(default)]
+        args: Vec<String>,
+    }
+
+    let cfgs: Vec<McpServerCfg> = match serde_json::from_str(raw) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("  Warning: OXIMY_MCP_SERVERS is not valid JSON ({e}); ignoring.");
+            return;
+        }
+    };
+
+    for cfg in cfgs {
+        let server = if let Some(url) = cfg.url {
+            McpServer::new(
+                cfg.name.clone(),
+                Arc::new(HttpTransport::new(cfg.name.clone(), url)),
+            )
+        } else if let Some(command) = cfg.command {
+            let mut cmd = tokio::process::Command::new(&command);
+            cmd.args(&cfg.args);
+            match StdioTransport::spawn(cfg.name.clone(), &mut cmd).await {
+                Ok(t) => McpServer::new(cfg.name.clone(), Arc::new(t)),
+                Err(e) => {
+                    eprintln!("  Warning: MCP server '{}' failed to spawn: {e}", cfg.name);
+                    continue;
+                }
+            }
+        } else {
+            eprintln!(
+                "  Warning: MCP server '{}' has neither 'url' nor 'command'; skipping.",
+                cfg.name
+            );
+            continue;
+        };
+
+        state.federation.register_server(server).await;
+        match state.federation.refresh_server(&cfg.name).await {
+            Ok(names) => {
+                tracing::info!(server = %cfg.name, tools = names.len(), "MCP server registered");
+            }
+            Err(e) => {
+                eprintln!(
+                    "  Warning: MCP server '{}' tool refresh failed: {e}",
+                    cfg.name
+                );
+            }
+        }
+    }
 }
 
 /// Print the freshly minted admin secret exactly once.

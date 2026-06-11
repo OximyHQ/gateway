@@ -16,6 +16,7 @@ pub mod error;
 pub mod gateway;
 pub mod guard;
 pub mod keystore;
+pub mod mcp;
 pub mod providers;
 pub mod route_exec;
 pub mod server;

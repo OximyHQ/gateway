@@ -20,6 +20,7 @@ gateway-config = { workspace = true }
 gateway-telemetry = { workspace = true }
 gateway-guard = { workspace = true }
 gateway-route = { workspace = true }
+gateway-mcp = { workspace = true }
 axum = { workspace = true }
 http = { workspace = true }
 uuid = { workspace = true }
