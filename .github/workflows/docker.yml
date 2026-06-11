@@ -61,7 +61,10 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          platforms: linux/amd64,linux/arm64
+          # amd64 only: arm64 would compile the whole Rust workspace under QEMU
+          # emulation (40-60+ min, frequently times out). arm64 images can be
+          # added later via native arm runners or by COPYing the release binary.
+          platforms: linux/amd64
           # Layer caching via GitHub Actions cache (no extra registry required)
           cache-from: type=gha
           cache-to: type=gha,mode=max
