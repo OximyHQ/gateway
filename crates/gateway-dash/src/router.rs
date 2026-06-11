@@ -82,7 +82,11 @@ mod tests {
         let cache = res.headers().get(header::CACHE_CONTROL).unwrap();
         assert_eq!(cache, "no-cache");
         let body = to_bytes(res.into_body(), 1 << 20).await.unwrap();
-        assert!(String::from_utf8_lossy(&body).contains("Oximy Gateway"));
+        let html = String::from_utf8_lossy(&body);
+        assert!(html.contains("Oximy Gateway"), "must contain brand name");
+        assert!(html.contains("Models"), "must contain Models tab");
+        assert!(html.contains("Playground"), "must contain Playground tab");
+        assert!(html.contains("Metrics"), "must contain Metrics tab");
     }
 
     #[tokio::test]
