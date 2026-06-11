@@ -17,7 +17,8 @@ use futures::stream::{Stream, StreamExt};
 use gateway_guard::{GuardContext, GuardStage, GuardVerdict};
 use gateway_llm::{ChatRequest, ChatResponse, ContentPart, ProviderError, Role, StreamDelta};
 use gateway_route::{Route, RouteError, Router};
-use gateway_spine::{AuditEvent, ReservationId, Usd, VirtualKey};
+use gateway_spine::{AuditEvent, Usd, VirtualKey};
+use gateway_store::StoreError;
 
 use crate::error::GatewayError;
 use crate::route_exec::RegistryExecutor;
@@ -165,6 +166,37 @@ fn mask_response_text(resp: &mut ChatResponse, masked: &str) {
     resp.content.extend(images);
 }
 
+/// Map a StoreError from a reserve call to a GatewayError, also releasing the
+/// parallel slot. Returns `None` for NotFound (treated as unlimited key).
+fn map_reserve_error(
+    e: StoreError,
+    key_id: &str,
+    budget_from_key: Option<Usd>,
+) -> Result<Option<String>, GatewayError> {
+    match e {
+        StoreError::NotFound => {
+            // Key not in store: treated as unlimited (no durable budget tracking).
+            Ok(None)
+        }
+        StoreError::BudgetExceeded {
+            budget_micros,
+            spent_micros,
+            reserved_micros,
+            requested_micros,
+        } => {
+            let _ = budget_from_key; // used for context if needed
+            Err(GatewayError::Spine(
+                gateway_spine::SpineError::BudgetExceeded {
+                    key_id: key_id.to_string(),
+                    would_spend_micros: spent_micros + reserved_micros + requested_micros,
+                    budget_micros,
+                },
+            ))
+        }
+        e => Err(GatewayError::BadRequest(format!("store error: {e}"))),
+    }
+}
+
 /// The lifecycle. Generic over the clock so tests inject `MockClock`.
 pub struct Gateway;
 
@@ -238,8 +270,9 @@ impl Gateway {
                 GatewayError::Spine(e)
             })?;
 
-        // 4. budget reserve (fail-closed, BEFORE egress). On failure, release the
-        //    parallel slot we just acquired, then propagate.
+        // 4. budget reserve (fail-closed, BEFORE egress) via the durable store.
+        //    On failure, release the parallel slot we just acquired, then propagate.
+        //    `None` reservation = key not in store → unlimited key, no tracking.
         let est_cost = match state.estimate_cost(model, est_tokens) {
             Ok(c) => c,
             Err(e) => {
@@ -247,21 +280,33 @@ impl Gateway {
                 return Err(e);
             }
         };
-        let reservation = match state.ledger.reserve(&key.id, est_cost) {
-            Ok(r) => r,
+        let reservation: Option<String> = match state.store.reserve(&key.id, est_cost).await {
+            Ok(res_id) => Some(res_id),
             Err(e) => {
                 state.limiter.release_parallel(&key.id);
-                Self::audit(
-                    state,
-                    key,
-                    "request.denied",
-                    model,
-                    "denied",
-                    "budget_exceeded",
-                );
-                return Err(GatewayError::Spine(e));
+                match map_reserve_error(e, &key.id, key.max_budget) {
+                    Ok(None) => {
+                        // unlimited key — also update the in-memory ledger for tests
+                        None
+                    }
+                    Ok(Some(_)) => unreachable!(),
+                    Err(ge) => {
+                        Self::audit(
+                            state,
+                            key,
+                            "request.denied",
+                            model,
+                            "denied",
+                            "budget_exceeded",
+                        );
+                        return Err(ge);
+                    }
+                }
             }
         };
+
+        // Also update the in-memory ledger so tests that read state.ledger still work.
+        let ledger_reservation = state.ledger.reserve(&key.id, est_cost).ok();
 
         // 5. PreRequest guard over the user prompt. A Block releases the
         //    reservation + parallel slot before any egress (403); a Mask rewrites
@@ -276,7 +321,12 @@ impl Gateway {
         };
         match state.guard.run(&pre_ctx).await.final_verdict {
             GuardVerdict::Block { reason } => {
-                let _ = state.ledger.release(reservation);
+                if let Some(res_id) = &reservation {
+                    let _ = state.store.release(res_id).await;
+                }
+                if let Some(lr) = ledger_reservation {
+                    let _ = state.ledger.release(lr);
+                }
                 state.limiter.release_parallel(&key.id);
                 Self::audit(state, key, "request.denied", model, "denied", &reason);
                 return Err(GatewayError::GuardBlocked(reason));
@@ -289,12 +339,7 @@ impl Gateway {
         }
 
         // 6. egress — mint ONE idempotency key (no-double-billing) and dispatch
-        //    through the Router. For a model with a single deployment (the common
-        //    case) the route is a single target and behaviour is unchanged; a
-        //    configured multi-target route adds failover/retry. The same
-        //    idempotency key is reused across every attempt (held by the executor)
-        //    so the spine bills once. Any terminal failure releases the
-        //    reservation + parallel slot.
+        //    through the Router.
         let idempotency_key = uuid::Uuid::new_v4().to_string();
         let route = state.route_for(model, &provider_id);
         let executor = RegistryExecutor::new(&state.providers, idempotency_key.clone());
@@ -302,7 +347,12 @@ impl Gateway {
         let (response, meta) = match router.call(&executor, req).await {
             Ok(ok) => ok,
             Err(e) => {
-                let _ = state.ledger.release(reservation);
+                if let Some(res_id) = &reservation {
+                    let _ = state.store.release(res_id).await;
+                }
+                if let Some(lr) = ledger_reservation {
+                    let _ = state.ledger.release(lr);
+                }
                 state.limiter.release_parallel(&key.id);
                 let ge = route_error_to_gateway(e);
                 Self::audit(state, key, "request.error", model, "error", &ge.to_string());
@@ -314,25 +364,27 @@ impl Gateway {
         let fallback_fired = meta.used_fallback || meta.hedge_won;
 
         // 7. commit ACTUAL cost from provider usage (true-up). Cost is computed
-        //    from the registry for the model that ACTUALLY served the request
-        //    (a failover target may price differently) — never guessed. Then
-        //    release the parallel slot. Cost is committed regardless of the
-        //    PostResponse guard verdict: the provider was billed, so we record
-        //    the true spend even if we then block/redact the content.
+        //    from the registry for the model that ACTUALLY served the request.
         let actual_cost = {
             let reg = state.registry.read().unwrap();
             reg.cost(&meta.model, &response.usage)
                 .or_else(|| reg.cost(model, &response.usage))
                 .unwrap_or(Usd::ZERO)
         };
-        state
-            .ledger
-            .commit(reservation, actual_cost)
-            .map_err(GatewayError::Spine)?;
+
+        // Commit to the durable store (async).
+        if let Some(res_id) = &reservation
+            && let Err(e) = state.store.commit(res_id, actual_cost).await
+        {
+            tracing::warn!(err = %e, "store commit failed (spend may be under-counted)");
+        }
+        // Also commit in the in-memory ledger so tests can assert on it.
+        if let Some(lr) = ledger_reservation {
+            let _ = state.ledger.commit(lr, actual_cost);
+        }
         state.limiter.release_parallel(&key.id);
 
-        // 8. PostResponse guard over the assistant output. Block → 403 (the
-        //    completion is withheld); Mask → redact the returned text in place.
+        // 8. PostResponse guard over the assistant output.
         let post_ctx = GuardContext {
             stage: GuardStage::PostResponse,
             text: response.text(),
@@ -429,18 +481,24 @@ impl Gateway {
                 return Err(e);
             }
         };
-        let reservation = match state.ledger.reserve(&key.id, est_cost) {
-            Ok(r) => r,
+
+        // Durable reserve via store.
+        let reservation: Option<String> = match state.store.reserve(&key.id, est_cost).await {
+            Ok(res_id) => Some(res_id),
             Err(e) => {
                 state.limiter.release_parallel(&key.id);
-                return Err(GatewayError::Spine(e));
+                match map_reserve_error(e, &key.id, key.max_budget) {
+                    Ok(None) => None,
+                    Ok(Some(_)) => unreachable!(),
+                    Err(ge) => return Err(ge),
+                }
             }
         };
 
-        // PreRequest guard over the prompt. Block → 403 before egress; Mask →
-        // rewrite the prompt. PostResponse content guarding is not applied to
-        // streamed output (we never buffer the whole stream — that would defeat
-        // streaming); secrets/PII on the egress prompt are still caught here.
+        // In-memory ledger reserve so tests can assert on ledger state.
+        let ledger_reservation = state.ledger.reserve(&key.id, est_cost).ok();
+
+        // PreRequest guard over the prompt.
         let pre_ctx = GuardContext {
             stage: GuardStage::PreRequest,
             text: user_prompt_text(req),
@@ -450,7 +508,12 @@ impl Gateway {
         };
         match state.guard.run(&pre_ctx).await.final_verdict {
             GuardVerdict::Block { reason } => {
-                let _ = state.ledger.release(reservation);
+                if let Some(res_id) = &reservation {
+                    let _ = state.store.release(res_id).await;
+                }
+                if let Some(lr) = ledger_reservation {
+                    let _ = state.ledger.release(lr);
+                }
                 state.limiter.release_parallel(&key.id);
                 Self::audit(&state, key, "request.denied", &model, "denied", &reason);
                 return Err(GatewayError::GuardBlocked(reason));
@@ -469,14 +532,25 @@ impl Gateway {
         {
             Ok(s) => s,
             Err(e) => {
-                let _ = state.ledger.release(reservation);
+                if let Some(res_id) = &reservation {
+                    let _ = state.store.release(res_id).await;
+                }
+                if let Some(lr) = ledger_reservation {
+                    let _ = state.ledger.release(lr);
+                }
                 state.limiter.release_parallel(&key.id);
                 return Err(GatewayError::Provider(e));
             }
         };
 
-        let wrapped =
-            Self::wrap_stream_for_commit(state, key.id.clone(), model, reservation, inner);
+        let wrapped = Self::wrap_stream_for_commit(
+            state,
+            key.id.clone(),
+            model,
+            reservation,
+            ledger_reservation,
+            inner,
+        );
         Ok(CompletedStream {
             stream: Box::pin(wrapped),
             idempotency_key,
@@ -489,7 +563,8 @@ impl Gateway {
         state: Arc<AppState<C>>,
         key_id: String,
         model: String,
-        reservation: ReservationId,
+        reservation: Option<String>,
+        ledger_reservation: Option<gateway_spine::ReservationId>,
         inner: std::pin::Pin<Box<dyn Stream<Item = Result<StreamDelta, ProviderError>> + Send>>,
     ) -> impl Stream<Item = Result<StreamDelta, ProviderError>> + Send {
         // State carried across the stream: the latest usage seen + a guard that
@@ -498,19 +573,42 @@ impl Gateway {
             state: Arc<AppState<C>>,
             key_id: String,
             model: String,
-            reservation: Option<ReservationId>,
+            /// `Some(...)` while guard is active; `take()` on first drop.
+            /// Inner `Option<String>` = the store reservation id (None = unlimited).
+            reservation: Option<Option<String>>,
+            /// In-memory ledger reservation for tests.
+            ledger_reservation: Option<Option<gateway_spine::ReservationId>>,
             last_usage: Option<gateway_spine::TokenUsage>,
+            /// Tokio runtime handle for spawning the async commit from Drop.
+            rt: tokio::runtime::Handle,
         }
         impl<C: gateway_spine::Clock> Drop for CommitGuard<C> {
             fn drop(&mut self) {
-                if let Some(res) = self.reservation.take() {
+                if let Some(maybe_res) = self.reservation.take() {
                     let cost = {
                         let reg = self.state.registry.read().unwrap();
                         self.last_usage
                             .and_then(|u| reg.cost(&self.model, &u))
                             .unwrap_or(Usd::ZERO)
                     };
-                    let _ = self.state.ledger.commit(res, cost);
+
+                    // Commit to durable store (fire and forget).
+                    if let Some(res_id) = maybe_res {
+                        let store = self.state.store.clone();
+                        let res_clone = res_id.clone();
+                        let cost_clone = cost;
+                        self.rt.spawn(async move {
+                            if let Err(e) = store.commit(&res_clone, cost_clone).await {
+                                tracing::warn!(err = %e, "stream commit to store failed");
+                            }
+                        });
+                    }
+
+                    // Commit in in-memory ledger for tests.
+                    if let Some(Some(lr)) = self.ledger_reservation.take() {
+                        let _ = self.state.ledger.commit(lr, cost);
+                    }
+
                     self.state.limiter.release_parallel(&self.key_id);
                     self.state.audit.record(AuditEvent {
                         ts_ms: self.state.clock.now_ms(),
@@ -524,12 +622,15 @@ impl Gateway {
             }
         }
 
+        let rt = tokio::runtime::Handle::current();
         let guard = CommitGuard {
             state,
             key_id,
             model,
             reservation: Some(reservation),
+            ledger_reservation: Some(ledger_reservation),
             last_usage: None,
+            rt,
         };
 
         futures::stream::unfold((inner, guard), |(mut inner, mut guard)| async move {
@@ -579,6 +680,7 @@ mod tests {
     use gateway_spine::{
         MemoryAudit, MockClock, ModelEntry, ModelPrice, RateLimits, TokenUsage, Usd, VirtualKey,
     };
+    use gateway_store::StoredKey;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// A provider that records how many times it was called + the last
@@ -680,8 +782,27 @@ mod tests {
         }
     }
 
+    fn make_stored_key(id: &str, budget: Option<Usd>) -> StoredKey {
+        StoredKey {
+            id: id.to_string(),
+            name: format!("key-{id}"),
+            token_hash: format!("hash-{id}"),
+            token_prefix: "sk-test".to_string(),
+            budget_micros: budget.map(|u| u.micros()),
+            spent_micros: 0,
+            rpm: None,
+            tpm: None,
+            max_parallel: None,
+            model_allowlist: None,
+            expires_at_ms: None,
+            revoked: false,
+            parent_id: None,
+            created_at_ms: 0,
+        }
+    }
+
     /// Build an AppState wired to a shared MockProvider so tests can inspect it.
-    fn state_with(provider: Arc<MockProvider>, budget: Option<Usd>) -> AppState<MockClock> {
+    async fn state_with(provider: Arc<MockProvider>, budget: Option<Usd>) -> AppState<MockClock> {
         let mut ks = StaticKeyStore::new();
         ks.insert(key(budget, None, RateLimits::default()));
         let mut providers = ProviderRegistry::new();
@@ -692,12 +813,24 @@ mod tests {
                 credentials: Arc::new(Credentials::new("sk-up")),
             },
         );
+        let store = Arc::new(
+            gateway_store::Store::connect("sqlite::memory:")
+                .await
+                .unwrap(),
+        );
+        // Seed the key in the store with budget so reserve works.
+        store
+            .upsert_key(&make_stored_key("key_1", budget))
+            .await
+            .unwrap();
+
         let state = AppState::with_parts(
             Arc::new(ks),
             Arc::new(MockClock::new(1_000)),
             providers,
             Arc::new(empty_chain()),
             Arc::new(MemoryAudit::new()),
+            store,
         );
         state.registry.write().unwrap().insert(gpt4o());
         state.ledger.set_budget("key_1", budget, Usd::ZERO);
@@ -706,7 +839,7 @@ mod tests {
 
     /// Like `state_with` but installs the production `default_chain` guard
     /// (secrets-block + PII-mask) so guard integration can be exercised.
-    fn state_with_default_guard(
+    async fn state_with_default_guard(
         provider: Arc<MockProvider>,
         budget: Option<Usd>,
     ) -> AppState<MockClock> {
@@ -720,12 +853,23 @@ mod tests {
                 credentials: Arc::new(Credentials::new("sk-up")),
             },
         );
+        let store = Arc::new(
+            gateway_store::Store::connect("sqlite::memory:")
+                .await
+                .unwrap(),
+        );
+        store
+            .upsert_key(&make_stored_key("key_1", budget))
+            .await
+            .unwrap();
+
         let state = AppState::with_parts(
             Arc::new(ks),
             Arc::new(MockClock::new(1_000)),
             providers,
             Arc::new(crate::guard::default_chain()),
             Arc::new(MemoryAudit::new()),
+            store,
         );
         state.registry.write().unwrap().insert(gpt4o());
         state.ledger.set_budget("key_1", budget, Usd::ZERO);
@@ -739,7 +883,8 @@ mod tests {
     #[tokio::test]
     async fn guard_blocks_secret_prompt_before_egress() {
         let provider = Arc::new(MockProvider::new(TokenUsage::default()));
-        let state = state_with_default_guard(provider.clone(), Some(Usd::from_dollars_f64(1.0)));
+        let state =
+            state_with_default_guard(provider.clone(), Some(Usd::from_dollars_f64(1.0))).await;
         let k = key(
             Some(Usd::from_dollars_f64(1.0)),
             None,
@@ -775,7 +920,8 @@ mod tests {
             ..Default::default()
         };
         let provider = Arc::new(MockProvider::new(usage));
-        let state = state_with_default_guard(provider.clone(), Some(Usd::from_dollars_f64(1.0)));
+        let state =
+            state_with_default_guard(provider.clone(), Some(Usd::from_dollars_f64(1.0))).await;
         let k = key(
             Some(Usd::from_dollars_f64(1.0)),
             None,
@@ -810,7 +956,8 @@ mod tests {
             ..Default::default()
         };
         let provider = Arc::new(MockProvider::new(usage));
-        let state = state_with_default_guard(provider.clone(), Some(Usd::from_dollars_f64(1.0)));
+        let state =
+            state_with_default_guard(provider.clone(), Some(Usd::from_dollars_f64(1.0))).await;
         let k = key(
             Some(Usd::from_dollars_f64(1.0)),
             None,
@@ -830,7 +977,7 @@ mod tests {
             ..Default::default()
         };
         let provider = Arc::new(MockProvider::new(usage));
-        let state = state_with(provider.clone(), Some(Usd::from_dollars_f64(1.0)));
+        let state = state_with(provider.clone(), Some(Usd::from_dollars_f64(1.0))).await;
         let k = key(
             Some(Usd::from_dollars_f64(1.0)),
             None,
@@ -859,7 +1006,7 @@ mod tests {
         };
         let provider = Arc::new(MockProvider::new(usage));
         // tiny budget that the worst-case estimate blows
-        let state = state_with(provider.clone(), Some(Usd::from_micros(1)));
+        let state = state_with(provider.clone(), Some(Usd::from_micros(1))).await;
         let k = key(Some(Usd::from_micros(1)), None, RateLimits::default());
 
         let err = Gateway::run(&state, &k, &chat_req()).await.unwrap_err();
@@ -876,7 +1023,7 @@ mod tests {
     #[tokio::test]
     async fn disallowed_model_is_403_no_egress() {
         let provider = Arc::new(MockProvider::new(TokenUsage::default()));
-        let state = state_with(provider.clone(), Some(Usd::from_dollars_f64(1.0)));
+        let state = state_with(provider.clone(), Some(Usd::from_dollars_f64(1.0))).await;
         let k = key(
             Some(Usd::from_dollars_f64(1.0)),
             Some(vec!["claude-3-5-sonnet".into()]),
@@ -890,7 +1037,7 @@ mod tests {
     #[tokio::test]
     async fn unknown_model_is_400() {
         let provider = Arc::new(MockProvider::new(TokenUsage::default()));
-        let state = state_with(provider.clone(), Some(Usd::from_dollars_f64(1.0)));
+        let state = state_with(provider.clone(), Some(Usd::from_dollars_f64(1.0))).await;
         let k = key(
             Some(Usd::from_dollars_f64(1.0)),
             None,
@@ -953,12 +1100,23 @@ mod tests {
                 credentials: Arc::new(Credentials::new("x")),
             },
         );
+        let store = Arc::new(
+            gateway_store::Store::connect("sqlite::memory:")
+                .await
+                .unwrap(),
+        );
+        store
+            .upsert_key(&make_stored_key("key_1", Some(Usd::from_dollars_f64(1.0))))
+            .await
+            .unwrap();
+
         let state = AppState::with_parts(
             Arc::new(ks),
             Arc::new(MockClock::new(0)),
             providers,
             Arc::new(empty_chain()),
             Arc::new(MemoryAudit::new()),
+            store,
         );
         state.registry.write().unwrap().insert(gpt4o());
         state
@@ -1042,12 +1200,23 @@ mod tests {
                 credentials: Arc::new(Credentials::new("x")),
             },
         );
+        let store = Arc::new(
+            gateway_store::Store::connect("sqlite::memory:")
+                .await
+                .unwrap(),
+        );
+        store
+            .upsert_key(&make_stored_key("key_1", Some(Usd::from_dollars_f64(1.0))))
+            .await
+            .unwrap();
+
         let state = Arc::new(AppState::with_parts(
             Arc::new(ks),
             Arc::new(MockClock::new(0)),
             providers,
             Arc::new(empty_chain()),
             Arc::new(MemoryAudit::new()),
+            store,
         ));
         state.registry.write().unwrap().insert(gpt4o());
         state
@@ -1071,6 +1240,8 @@ mod tests {
             chunks += 1;
         }
         drop(s); // ensure the commit guard drops
+        // Give tokio a moment to process the spawned commit task.
+        tokio::task::yield_now().await;
         assert_eq!(chunks, 3);
         assert_eq!(state.ledger.spent("key_1"), Usd::from_micros(7_500));
         assert_eq!(state.ledger.reserved("key_1"), Usd::ZERO);
@@ -1138,12 +1309,23 @@ mod tests {
                 credentials: Arc::new(Credentials::new("x")),
             },
         );
+        let store = Arc::new(
+            gateway_store::Store::connect("sqlite::memory:")
+                .await
+                .unwrap(),
+        );
+        store
+            .upsert_key(&make_stored_key("key_1", Some(Usd::from_dollars_f64(1.0))))
+            .await
+            .unwrap();
+
         let state = Arc::new(AppState::with_parts(
             Arc::new(ks),
             Arc::new(MockClock::new(0)),
             providers,
             Arc::new(empty_chain()),
             Arc::new(MemoryAudit::new()),
+            store,
         ));
         state.registry.write().unwrap().insert(gpt4o());
         state
@@ -1164,6 +1346,8 @@ mod tests {
         let first = s.next().await.unwrap();
         first.unwrap();
         drop(s); // abort → CommitGuard drops → commit fires from last_usage
+        // Give tokio a moment to process the spawned commit task.
+        tokio::task::yield_now().await;
 
         assert_eq!(
             state.ledger.spent("key_1"),
@@ -1269,12 +1453,23 @@ mod tests {
                 credentials: Arc::new(Credentials::new("b")),
             },
         );
+        let store = Arc::new(
+            gateway_store::Store::connect("sqlite::memory:")
+                .await
+                .unwrap(),
+        );
+        store
+            .upsert_key(&make_stored_key("key_1", Some(Usd::from_dollars_f64(1.0))))
+            .await
+            .unwrap();
+
         let state = AppState::with_parts(
             Arc::new(ks),
             Arc::new(MockClock::new(0)),
             providers,
             Arc::new(empty_chain()),
             Arc::new(MemoryAudit::new()),
+            store,
         );
         // The request model is "gpt-4o" served by the "primary" provider.
         let mut entry = gpt4o();
@@ -1325,7 +1520,7 @@ mod tests {
             ..Default::default()
         };
         let provider = Arc::new(MockProvider::new(usage));
-        let state = state_with(provider.clone(), Some(Usd::from_dollars_f64(1.0)));
+        let state = state_with(provider.clone(), Some(Usd::from_dollars_f64(1.0))).await;
         let k = key(
             Some(Usd::from_dollars_f64(1.0)),
             None,

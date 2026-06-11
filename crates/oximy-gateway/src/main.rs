@@ -247,7 +247,42 @@ async fn run_up_async(args: UpArgs) -> anyhow::Result<()> {
         );
     }
 
-    // ── 5. Spin up the telemetry writer ──────────────────────────────────────
+    // ── 5. Open (or create) the durable SQLite store ─────────────────────────
+    let db_url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| format!("sqlite:{}", data_dir.join("gateway.db").display()));
+    let durable_store = Arc::new(
+        gateway_store::Store::connect(&db_url)
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to open gateway store at {db_url}: {e}"))?,
+    );
+    tracing::info!(db = %db_url, "gateway store opened");
+
+    // One-time migration: import any keys already in the JSON state file into
+    // the SQLite store so they survive the transition without re-keying.
+    for key in sf.load_keys() {
+        let sk = gateway_store::StoredKey {
+            id: key.id.clone(),
+            name: key.id.clone(),
+            token_hash: key.token_hash.clone(),
+            token_prefix: key.token_prefix.clone(),
+            budget_micros: key.max_budget.map(|u| u.micros()),
+            spent_micros: 0,
+            rpm: key.limits.rpm,
+            tpm: key.limits.tpm,
+            max_parallel: key.limits.max_parallel,
+            model_allowlist: key.model_allowlist.clone(),
+            expires_at_ms: None,
+            revoked: key.revoked,
+            parent_id: key.parent_id.clone(),
+            created_at_ms: 0,
+        };
+        // upsert is idempotent: safe to call on every startup
+        if let Err(e) = durable_store.upsert_key(&sk).await {
+            tracing::warn!(key_id = %key.id, err = %e, "failed to migrate key to store");
+        }
+    }
+
+    // ── 5b. Spin up the telemetry writer ─────────────────────────────────────
     use gateway_telemetry::{
         DEFAULT_CHANNEL_CAPACITY, GatewayMetrics, MemorySpendStore, spawn as spawn_telemetry,
     };
@@ -297,6 +332,7 @@ async fn run_up_async(args: UpArgs) -> anyhow::Result<()> {
         telem_sink,
         metrics,
         Arc::clone(&spend_store) as Arc<dyn gateway_telemetry::SpendStore>,
+        Arc::clone(&durable_store),
     );
 
     {
@@ -344,6 +380,28 @@ async fn run_up_async(args: UpArgs) -> anyhow::Result<()> {
         && !raw.trim().is_empty()
     {
         register_mcp_servers(&state, &raw).await;
+    }
+
+    // ── 6f. Spawn background reservation sweep ───────────────────────────────
+    // Sweeps stale (crashed/orphaned) reservations every 60s so they don't
+    // block future budget reservations indefinitely.
+    {
+        let sweep_store = Arc::clone(&durable_store);
+        tokio::spawn(async move {
+            let ttl_ms: i64 = 5 * 60 * 1_000; // 5 minutes
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as i64;
+                match sweep_store.sweep_stale_reservations(ttl_ms, now_ms).await {
+                    Ok(n) if n > 0 => tracing::info!(swept = n, "swept stale reservations"),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(err = %e, "reservation sweep failed"),
+                }
+            }
+        });
     }
 
     // ── 7. Build the app router: API + dashboard (mounted last) ───────────────

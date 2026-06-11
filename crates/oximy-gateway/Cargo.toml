@@ -36,3 +36,4 @@ gateway-guard = { workspace = true }
 gateway-config = { workspace = true }
 gateway-control = { workspace = true }
 gateway-dash = { workspace = true }
+gateway-store = { workspace = true }

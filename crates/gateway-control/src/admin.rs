@@ -111,6 +111,10 @@ pub struct UsageBucket {
 pub struct UsageResponse {
     group_by: String,
     buckets: Vec<UsageBucket>,
+    /// Durable spend for the authenticated key (from SQLite store). Survives restarts.
+    spent_usd: f64,
+    /// Total cost across all telemetry buckets (in-memory, resets on restart).
+    total_usd: f64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -271,25 +275,29 @@ async fn list_keys<C: Clock + 'static>(
     };
 
     let keys = mks.all_keys();
-    let summaries: Vec<KeySummary> = keys
-        .into_iter()
-        .map(|k| {
-            let spent_usd = state.ledger.spent(&k.id).as_dollars_f64();
-            // Use the id as a human name (strip "key_" prefix for display).
-            let name = k.id.trim_start_matches("key_").to_string();
-            KeySummary {
-                id: k.id.clone(),
-                name,
-                prefix: k.token_prefix.clone(),
-                budget_usd: k.max_budget.map(|u| u.as_dollars_f64()),
-                spent_usd,
-                models: k.model_allowlist.clone(),
-                rpm: k.limits.rpm,
-                tpm: k.limits.tpm,
-                revoked: k.revoked,
-            }
-        })
-        .collect();
+    let mut summaries: Vec<KeySummary> = Vec::with_capacity(keys.len());
+    for k in keys {
+        // Read durable spend from SQLite store (survives restarts).
+        let spent_usd = state
+            .store
+            .spent(&k.id)
+            .await
+            .unwrap_or(gateway_spine::Usd::ZERO)
+            .as_dollars_f64();
+        // Use the id as a human name (strip "key_" prefix for display).
+        let name = k.id.trim_start_matches("key_").to_string();
+        summaries.push(KeySummary {
+            id: k.id.clone(),
+            name,
+            prefix: k.token_prefix.clone(),
+            budget_usd: k.max_budget.map(|u| u.as_dollars_f64()),
+            spent_usd,
+            models: k.model_allowlist.clone(),
+            rpm: k.limits.rpm,
+            tpm: k.limits.tpm,
+            revoked: k.revoked,
+        });
+    }
 
     Json(KeysResponse { keys: summaries }).into_response()
 }
@@ -348,6 +356,27 @@ async fn create_key<C: Clock + 'static>(
     // Register budget in the ledger so requests work immediately.
     state.ledger.set_budget(&key_id, max_budget, Usd::ZERO);
 
+    // Persist to durable store (async, best-effort — log on failure).
+    let stored_key = gateway_store::StoredKey {
+        id: key_id.clone(),
+        name: body.name.clone(),
+        token_hash: key.token_hash.clone(),
+        token_prefix: token_prefix.clone(),
+        budget_micros: max_budget.map(|u| u.micros()),
+        spent_micros: 0,
+        rpm: body.rpm,
+        tpm: body.tpm,
+        max_parallel: None,
+        model_allowlist: body.models.clone(),
+        expires_at_ms: None,
+        revoked: false,
+        parent_id: None,
+        created_at_ms: ts,
+    };
+    if let Err(e) = state.store.upsert_key(&stored_key).await {
+        tracing::warn!(err = %e, key_id = %key_id, "failed to persist new key to store");
+    }
+
     // Rate-limiter state is keyed by the VirtualKey.limits field at acquire-time;
     // no pre-configuration step is required — the limiter reads limits from the
     // key on each request.
@@ -391,6 +420,10 @@ async fn revoke_key<C: Clock + 'static>(
     };
 
     if mks.revoke(&id) {
+        // Also persist revocation to the durable store.
+        if let Err(e) = state.store.revoke_key(&id).await {
+            tracing::warn!(err = %e, key_id = %id, "failed to persist key revocation to store");
+        }
         Json(RevokeResponse { id, revoked: true }).into_response()
     } else {
         (
@@ -407,10 +440,10 @@ async fn usage<C: Clock + 'static>(
     headers: HeaderMap,
     Query(params): Query<UsageQuery>,
 ) -> Response {
-    match authenticate(state.keys.as_ref(), state.clock.as_ref(), bearer(&headers)) {
-        Ok(_) => {}
+    let key = match authenticate(state.keys.as_ref(), state.clock.as_ref(), bearer(&headers)) {
+        Ok(k) => k,
         Err(e) => return e.into_response(),
-    }
+    };
 
     let group_by_str = params.group_by.as_deref().unwrap_or("model");
     let group_by = match group_by_str {
@@ -423,6 +456,8 @@ async fn usage<C: Clock + 'static>(
         .spend_store
         .query(group_by, TimeRange::default(), None);
 
+    let total_usd: f64 = buckets.iter().map(|b| b.cost.as_dollars_f64()).sum();
+
     let wire: Vec<UsageBucket> = buckets
         .into_iter()
         .map(|b| UsageBucket {
@@ -433,9 +468,19 @@ async fn usage<C: Clock + 'static>(
         })
         .collect();
 
+    // Durable spend from SQLite store for the authenticated key (survives restarts).
+    let spent_usd = state
+        .store
+        .spent(&key.id)
+        .await
+        .unwrap_or(gateway_spine::Usd::ZERO)
+        .as_dollars_f64();
+
     Json(UsageResponse {
         group_by: group_by_str.to_string(),
         buckets: wire,
+        spent_usd,
+        total_usd,
     })
     .into_response()
 }
@@ -642,7 +687,7 @@ mod tests {
     }
 
     /// Build a test state with a `MutableKeyStore` and a shared spend store.
-    fn test_state() -> (Arc<AppState<MockClock>>, Arc<MemorySpendStore>) {
+    async fn test_state() -> (Arc<AppState<MockClock>>, Arc<MemorySpendStore>) {
         let mks = Arc::new(MutableKeyStore::new());
         mks.insert(VirtualKey {
             id: "key_1".into(),
@@ -666,12 +711,39 @@ mod tests {
         );
 
         let metrics = Arc::new(GatewayMetrics::new());
-        let store = Arc::new(MemorySpendStore::new());
+        let spend_store = Arc::new(MemorySpendStore::new());
         let (sink, _writer) = spawn_telem(
-            Arc::clone(&store),
+            Arc::clone(&spend_store),
             Arc::clone(&metrics),
             DEFAULT_CHANNEL_CAPACITY,
         );
+
+        // In-memory SQLite store for durable budget/key persistence in tests.
+        let durable_store = Arc::new(
+            gateway_store::Store::connect("sqlite::memory:")
+                .await
+                .unwrap(),
+        );
+        // Seed the key_1 into the durable store with budget.
+        durable_store
+            .upsert_key(&gateway_store::StoredKey {
+                id: "key_1".to_string(),
+                name: "key_1".to_string(),
+                token_hash: VirtualKey::hash_secret("sk-good"),
+                token_prefix: "sk-good".to_string(),
+                budget_micros: Some(Usd::from_dollars_f64(10.0).micros()),
+                spent_micros: 0,
+                rpm: None,
+                tpm: None,
+                max_parallel: None,
+                model_allowlist: None,
+                expires_at_ms: None,
+                revoked: false,
+                parent_id: None,
+                created_at_ms: 0,
+            })
+            .await
+            .unwrap();
 
         let state = Arc::new(AppState::with_parts_and_telemetry(
             mks,
@@ -681,21 +753,22 @@ mod tests {
             Arc::new(MemoryAudit::new()),
             sink,
             metrics,
-            Arc::clone(&store) as Arc<dyn gateway_telemetry::SpendStore>,
+            Arc::clone(&spend_store) as Arc<dyn gateway_telemetry::SpendStore>,
+            durable_store,
         ));
         state.registry.write().unwrap().insert(gpt4o());
         state
             .ledger
             .set_budget("key_1", Some(Usd::from_dollars_f64(10.0)), Usd::ZERO);
 
-        (state, store)
+        (state, spend_store)
     }
 
     // ── overview ───────────────────────────────────────────────────────────
 
     #[tokio::test]
     async fn overview_unauthenticated_is_401() {
-        let (state, _) = test_state();
+        let (state, _) = test_state().await;
         let app = admin_router(state);
         let resp = app
             .oneshot(
@@ -712,7 +785,7 @@ mod tests {
 
     #[tokio::test]
     async fn overview_returns_expected_shape() {
-        let (state, _) = test_state();
+        let (state, _) = test_state().await;
         let app = admin_router(state);
         let resp = app
             .oneshot(
@@ -740,7 +813,7 @@ mod tests {
 
     #[tokio::test]
     async fn keys_list_returns_seeded_key() {
-        let (state, _) = test_state();
+        let (state, _) = test_state().await;
         let app = admin_router(state);
         let resp = app
             .oneshot(
@@ -768,7 +841,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_key_returns_201_with_secret() {
-        let (state, _) = test_state();
+        let (state, _) = test_state().await;
         let app = admin_router(state);
         let resp = app
             .oneshot(
@@ -793,7 +866,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_key_unauthenticated_is_401() {
-        let (state, _) = test_state();
+        let (state, _) = test_state().await;
         let app = admin_router(state);
         let resp = app
             .oneshot(
@@ -813,7 +886,7 @@ mod tests {
 
     #[tokio::test]
     async fn revoke_existing_key_returns_revoked_true() {
-        let (state, _) = test_state();
+        let (state, _) = test_state().await;
         let app = admin_router(state);
         let resp = app
             .oneshot(
@@ -835,7 +908,7 @@ mod tests {
 
     #[tokio::test]
     async fn revoke_missing_key_is_404() {
-        let (state, _) = test_state();
+        let (state, _) = test_state().await;
         let app = admin_router(state);
         let resp = app
             .oneshot(
@@ -855,7 +928,7 @@ mod tests {
 
     #[tokio::test]
     async fn usage_empty_returns_correct_shape() {
-        let (state, _) = test_state();
+        let (state, _) = test_state().await;
         let app = admin_router(state);
         let resp = app
             .oneshot(
@@ -879,7 +952,7 @@ mod tests {
 
     #[tokio::test]
     async fn logs_returns_correct_shape() {
-        let (state, _) = test_state();
+        let (state, _) = test_state().await;
         let app = admin_router(state);
         let resp = app
             .oneshot(
@@ -902,7 +975,7 @@ mod tests {
 
     #[tokio::test]
     async fn providers_returns_openai() {
-        let (state, _) = test_state();
+        let (state, _) = test_state().await;
         let app = admin_router(state);
         let resp = app
             .oneshot(
@@ -929,7 +1002,7 @@ mod tests {
 
     #[tokio::test]
     async fn mcp_empty_federation_returns_empty_list() {
-        let (state, _) = test_state();
+        let (state, _) = test_state().await;
         let app = admin_router(state);
         let resp = app
             .oneshot(
@@ -952,7 +1025,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_key_then_use_it_then_revoke() {
-        let (state, _) = test_state();
+        let (state, _) = test_state().await;
         // The main router already includes admin routes via `router()`.
         let app: axum::Router = crate::server::router(Arc::clone(&state));
 

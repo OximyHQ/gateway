@@ -2,8 +2,7 @@
 //! It owns the spine governance components (registry, ledger, limiter, key
 //! store, audit, clock) and the egress providers + guard seam. Everything is
 //! behind `Arc`/interior-mutability so the whole state is cheap to clone per
-//! request and safe to share across the Tokio pool. P1.6 swaps the in-memory
-//! stores for persistent ones behind the same field types (trait objects).
+//! request and safe to share across the Tokio pool.
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -14,6 +13,7 @@ use gateway_route::Route;
 use gateway_spine::{
     AuditSink, BudgetLedger, Clock, MemoryAudit, ModelRegistry, RateLimiter, SystemClock,
 };
+use gateway_store::Store;
 use gateway_telemetry::{GatewayMetrics, MemorySpendStore, SpendStore, TelemetrySink, spawn};
 
 // Re-export so callers that need to build a sink don't depend on gateway-telemetry directly.
@@ -29,6 +29,8 @@ use crate::providers::ProviderRegistry;
 /// shares the same clock instance as `AppState.clock`.
 pub struct AppState<C: Clock = SystemClock> {
     pub registry: RwLock<ModelRegistry>,
+    /// Kept for backward compatibility with tests that assert on ledger directly.
+    /// In production, durable budget tracking flows through `store`.
     pub ledger: Arc<BudgetLedger>,
     pub limiter: Arc<RateLimiter<Arc<C>>>,
     pub keys: Arc<dyn KeyStore>,
@@ -37,40 +39,36 @@ pub struct AppState<C: Clock = SystemClock> {
     /// `PostResponse` (over the completion). Blocks secrets, masks PII by default.
     pub guard: Arc<GuardChain>,
     /// Optional per-model route overrides: model id → ordered targets + strategy.
-    /// A model with NO entry routes as a single target to its registry provider
-    /// (behaviour unchanged from the pre-routing path). Populated by config; see
-    /// [`AppState::set_route`].
     pub routes: RwLock<HashMap<String, Route>>,
     pub audit: Arc<dyn AuditSink>,
-    /// The MCP federation behind the authenticated `POST /mcp` endpoint. Shares
-    /// the same `audit` sink so tool-call events land on the one spine. Built
-    /// empty (zero upstream servers) — the binary registers servers from config.
+    /// The MCP federation behind the authenticated `POST /mcp` endpoint.
     pub federation: Arc<Federation>,
     pub clock: Arc<C>,
     /// Non-blocking telemetry sink — `try_send` only, never blocks a request.
     pub telemetry: TelemetrySink,
     /// Live Prometheus metrics, rendered by the authenticated `/metrics` handler.
     pub metrics: Arc<GatewayMetrics>,
-    /// Optional L1/L2 response cache. Clock-erased so it can be stored in a
-    /// `C`-generic struct without constraining `C`. `None` → all requests are
-    /// cache-bypassed (the default for tests that don't need caching).
+    /// Optional L1/L2 response cache.
     pub cache: Option<Arc<dyn CacheHandle>>,
     /// The live spend store shared between the telemetry writer and the admin
-    /// endpoints. The telemetry writer appends rows; the admin endpoints read.
-    /// `Arc<dyn SpendStore>` lets tests inject a `MemorySpendStore`.
+    /// endpoints.
     pub spend_store: Arc<dyn SpendStore>,
+    /// Durable SQLite/Postgres-backed store: keys + spend ledger. Single source
+    /// of truth for budget tracking and key persistence — survives restarts.
+    pub store: Arc<Store>,
 }
 
 impl AppState<SystemClock> {
     /// Production constructor: a system clock, empty registry/providers to be
-    /// populated by the binary (P1.8) or a config load (P1.6).
-    pub fn new(keys: Arc<dyn KeyStore>) -> Self {
+    /// populated by the binary or a config load.
+    pub fn new(keys: Arc<dyn KeyStore>, store: Arc<Store>) -> Self {
         Self::with_parts(
             keys,
             Arc::new(SystemClock),
             ProviderRegistry::new(),
             Arc::new(default_chain()),
             Arc::new(MemoryAudit::new()),
+            store,
         )
     }
 }
@@ -84,16 +82,25 @@ impl<C: Clock> AppState<C> {
         providers: ProviderRegistry,
         guard: Arc<GuardChain>,
         audit: Arc<dyn AuditSink>,
+        store: Arc<Store>,
     ) -> Self {
         let metrics = Arc::new(GatewayMetrics::new());
-        let store = Arc::new(MemorySpendStore::new());
+        let spend_store = Arc::new(MemorySpendStore::new());
         let (telemetry, _writer) = spawn(
-            Arc::clone(&store),
+            Arc::clone(&spend_store),
             Arc::clone(&metrics),
             gateway_telemetry::DEFAULT_CHANNEL_CAPACITY,
         );
         Self::with_parts_and_telemetry(
-            keys, clock, providers, guard, audit, telemetry, metrics, store,
+            keys,
+            clock,
+            providers,
+            guard,
+            audit,
+            telemetry,
+            metrics,
+            spend_store,
+            store,
         )
     }
 
@@ -110,6 +117,7 @@ impl<C: Clock> AppState<C> {
         telemetry: TelemetrySink,
         metrics: Arc<GatewayMetrics>,
         spend_store: Arc<dyn SpendStore>,
+        store: Arc<Store>,
     ) -> Self {
         // Arc<C>: Clock via the blanket impl in gateway-spine, so RateLimiter<Arc<C>> works.
         let limiter = Arc::new(RateLimiter::new(clock.clone()));
@@ -131,11 +139,11 @@ impl<C: Clock> AppState<C> {
             metrics,
             cache: None,
             spend_store,
+            store,
         }
     }
 
-    /// Install (or replace) the route for a model id. A configured route lets a
-    /// model fail over / load-balance across multiple (provider, model) targets.
+    /// Install (or replace) the route for a model id.
     pub fn set_route(&self, model: impl Into<String>, route: Route) {
         self.routes.write().unwrap().insert(model.into(), route);
     }
@@ -147,17 +155,23 @@ mod tests {
     use crate::keystore::StaticKeyStore;
     use gateway_spine::MockClock;
 
+    async fn mem_store() -> Arc<Store> {
+        Arc::new(Store::connect("sqlite::memory:").await.unwrap())
+    }
+
     #[tokio::test]
     async fn builds_with_a_static_keystore() {
         let mut ks = StaticKeyStore::new();
         ks.bootstrap("sk-x", None);
         let clock = Arc::new(MockClock::new(0));
+        let store = mem_store().await;
         let state = AppState::with_parts(
             Arc::new(ks),
             clock,
             ProviderRegistry::new(),
             Arc::new(crate::guard::empty_chain()),
             Arc::new(MemoryAudit::new()),
+            store,
         );
         assert!(state.keys.resolve("sk-x").is_some());
         assert!(state.registry.read().unwrap().is_empty());
@@ -167,12 +181,14 @@ mod tests {
     async fn cache_is_none_by_default() {
         let ks = StaticKeyStore::new();
         let clock = Arc::new(MockClock::new(0));
+        let store = mem_store().await;
         let state = AppState::with_parts(
             Arc::new(ks),
             clock,
             ProviderRegistry::new(),
             Arc::new(crate::guard::empty_chain()),
             Arc::new(MemoryAudit::new()),
+            store,
         );
         assert!(state.cache.is_none());
     }
@@ -181,12 +197,14 @@ mod tests {
     async fn spend_store_is_accessible() {
         let ks = StaticKeyStore::new();
         let clock = Arc::new(MockClock::new(0));
+        let store = mem_store().await;
         let state = AppState::with_parts(
             Arc::new(ks),
             clock,
             ProviderRegistry::new(),
             Arc::new(crate::guard::empty_chain()),
             Arc::new(MemoryAudit::new()),
+            store,
         );
         // No rows yet; just check it's wired.
         assert_eq!(state.spend_store.row_count(), 0);

@@ -577,7 +577,37 @@ mod tests {
         }
     }
 
-    fn test_state() -> Arc<AppState<MockClock>> {
+    async fn mem_store() -> Arc<gateway_store::Store> {
+        Arc::new(
+            gateway_store::Store::connect("sqlite::memory:")
+                .await
+                .unwrap(),
+        )
+    }
+
+    async fn seed_key_1(store: &gateway_store::Store, budget: f64) {
+        store
+            .upsert_key(&gateway_store::StoredKey {
+                id: "key_1".to_string(),
+                name: "key_1".to_string(),
+                token_hash: VirtualKey::hash_secret("sk-good"),
+                token_prefix: "sk-good".to_string(),
+                budget_micros: Some(Usd::from_dollars_f64(budget).micros()),
+                spent_micros: 0,
+                rpm: None,
+                tpm: None,
+                max_parallel: None,
+                model_allowlist: None,
+                expires_at_ms: None,
+                revoked: false,
+                parent_id: None,
+                created_at_ms: 0,
+            })
+            .await
+            .unwrap();
+    }
+
+    async fn test_state() -> Arc<AppState<MockClock>> {
         let mut ks = StaticKeyStore::new();
         ks.insert(VirtualKey {
             id: "key_1".into(),
@@ -598,12 +628,15 @@ mod tests {
                 credentials: Arc::new(Credentials::new("up")),
             },
         );
+        let store = mem_store().await;
+        seed_key_1(&store, 10.0).await;
         let state = Arc::new(AppState::with_parts(
             Arc::new(ks),
             Arc::new(MockClock::new(0)),
             providers,
             Arc::new(empty_chain()),
             Arc::new(MemoryAudit::new()),
+            store,
         ));
         state.registry.write().unwrap().insert(gpt4o());
         state
@@ -613,7 +646,7 @@ mod tests {
     }
 
     /// Build a state with a cache and a counting provider (SystemClock required for cache).
-    fn state_with_cache(calls: Arc<AtomicUsize>) -> Arc<AppState<SystemClock>> {
+    async fn state_with_cache(calls: Arc<AtomicUsize>) -> Arc<AppState<SystemClock>> {
         let mut ks = StaticKeyStore::new();
         ks.insert(VirtualKey {
             id: "key_1".into(),
@@ -634,12 +667,15 @@ mod tests {
                 credentials: Arc::new(Credentials::new("sk-up")),
             },
         );
+        let store = mem_store().await;
+        seed_key_1(&store, 100.0).await;
         let mut state = AppState::with_parts(
             Arc::new(ks),
             Arc::new(SystemClock),
             providers,
             Arc::new(empty_chain()),
             Arc::new(MemoryAudit::new()),
+            store,
         );
         state.registry.write().unwrap().insert(gpt4o());
         state
@@ -652,7 +688,7 @@ mod tests {
 
     #[tokio::test]
     async fn unauthenticated_chat_is_401() {
-        let app = router(test_state());
+        let app = router(test_state().await);
         let resp = app
             .oneshot(
                 Request::builder()
@@ -671,7 +707,7 @@ mod tests {
 
     #[tokio::test]
     async fn authenticated_chat_returns_cost_and_overhead_header() {
-        let app = router(test_state());
+        let app = router(test_state().await);
         let resp = app
             .oneshot(
                 Request::builder()
@@ -697,7 +733,7 @@ mod tests {
 
     #[tokio::test]
     async fn streaming_chat_emits_sse_then_done() {
-        let app = router(test_state());
+        let app = router(test_state().await);
         let resp = app
             .oneshot(
                 Request::builder()
@@ -726,7 +762,7 @@ mod tests {
 
     #[tokio::test]
     async fn models_lists_registry() {
-        let app = router(test_state());
+        let app = router(test_state().await);
         let resp = app
             .oneshot(
                 Request::builder()
@@ -747,7 +783,7 @@ mod tests {
 
     #[tokio::test]
     async fn embeddings_authed_is_501() {
-        let app = router(test_state());
+        let app = router(test_state().await);
         let resp = app
             .oneshot(
                 Request::builder()
@@ -769,7 +805,7 @@ mod tests {
 
     #[tokio::test]
     async fn metrics_without_bearer_is_401() {
-        let app = router(test_state());
+        let app = router(test_state().await);
         let resp = app
             .oneshot(
                 Request::builder()
@@ -785,7 +821,7 @@ mod tests {
 
     #[tokio::test]
     async fn metrics_with_bad_token_is_401() {
-        let app = router(test_state());
+        let app = router(test_state().await);
         let resp = app
             .oneshot(
                 Request::builder()
@@ -802,7 +838,7 @@ mod tests {
 
     #[tokio::test]
     async fn metrics_with_valid_bearer_returns_prometheus_text() {
-        let app = router(test_state());
+        let app = router(test_state().await);
         let resp = app
             .oneshot(
                 Request::builder()
@@ -838,7 +874,7 @@ mod tests {
     async fn unknown_v1_path_is_404_not_spa_html() {
         // Before the fix, the SPA catch-all intercepted /v1/* and returned 200
         // with HTML.  After the fix, the explicit fallback returns 404 JSON.
-        let app = router(test_state());
+        let app = router(test_state().await);
         let resp = app
             .oneshot(
                 Request::builder()
@@ -893,6 +929,8 @@ mod tests {
                 credentials: Arc::new(Credentials::new("up")),
             },
         );
+        let durable_store = mem_store().await;
+        seed_key_1(&durable_store, 10.0).await;
         let state = Arc::new(AppState::with_parts_and_telemetry(
             Arc::new(ks),
             Arc::new(MockClock::new(0)),
@@ -902,6 +940,7 @@ mod tests {
             sink,
             Arc::clone(&metrics),
             Arc::clone(&store) as Arc<dyn gateway_telemetry::SpendStore>,
+            durable_store,
         ));
         state.registry.write().unwrap().insert(gpt4o());
         state
@@ -952,7 +991,7 @@ mod tests {
     #[tokio::test]
     async fn cache_miss_returns_x_cache_miss_header() {
         let calls = Arc::new(AtomicUsize::new(0));
-        let state = state_with_cache(Arc::clone(&calls));
+        let state = state_with_cache(Arc::clone(&calls)).await;
         let app = router(state);
 
         let resp = app
@@ -978,7 +1017,7 @@ mod tests {
     #[tokio::test]
     async fn cache_hit_skips_provider_and_returns_hit_header() {
         let calls = Arc::new(AtomicUsize::new(0));
-        let state = state_with_cache(Arc::clone(&calls));
+        let state = state_with_cache(Arc::clone(&calls)).await;
 
         // First call: MISS — populates cache.
         let resp1 = router(Arc::clone(&state))
@@ -1033,7 +1072,7 @@ mod tests {
     #[tokio::test]
     async fn cache_no_store_directive_skips_write() {
         let calls = Arc::new(AtomicUsize::new(0));
-        let state = state_with_cache(Arc::clone(&calls));
+        let state = state_with_cache(Arc::clone(&calls)).await;
 
         // First call with no-store: MISS, response NOT stored.
         let resp1 = router(Arc::clone(&state))

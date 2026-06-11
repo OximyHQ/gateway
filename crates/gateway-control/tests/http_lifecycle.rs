@@ -88,7 +88,7 @@ fn gpt4o() -> ModelEntry {
     }
 }
 
-fn build(budget: Usd) -> (Arc<AppState<MockClock>>, Arc<Counting>) {
+async fn build(budget: Usd) -> (Arc<AppState<MockClock>>, Arc<Counting>) {
     let provider = Arc::new(Counting {
         calls: AtomicUsize::new(0),
     });
@@ -112,12 +112,37 @@ fn build(budget: Usd) -> (Arc<AppState<MockClock>>, Arc<Counting>) {
             credentials: Arc::new(Credentials::new("up")),
         },
     );
+    let store = Arc::new(
+        gateway_store::Store::connect("sqlite::memory:")
+            .await
+            .unwrap(),
+    );
+    store
+        .upsert_key(&gateway_store::StoredKey {
+            id: "key_1".to_string(),
+            name: "key_1".to_string(),
+            token_hash: VirtualKey::hash_secret("sk-good"),
+            token_prefix: "sk-good".to_string(),
+            budget_micros: Some(budget.micros()),
+            spent_micros: 0,
+            rpm: None,
+            tpm: None,
+            max_parallel: None,
+            model_allowlist: None,
+            expires_at_ms: None,
+            revoked: false,
+            parent_id: None,
+            created_at_ms: 0,
+        })
+        .await
+        .unwrap();
     let state = Arc::new(AppState::with_parts(
         Arc::new(ks),
         Arc::new(MockClock::new(0)),
         providers,
         Arc::new(empty_chain()),
         Arc::new(MemoryAudit::new()),
+        store,
     ));
     state.registry.write().unwrap().insert(gpt4o());
     state.ledger.set_budget("key_1", Some(budget), Usd::ZERO);
@@ -130,7 +155,7 @@ fn chat_body() -> Body {
 
 #[tokio::test]
 async fn successful_request_bills_and_returns_cost() {
-    let (state, provider) = build(Usd::from_dollars_f64(10.0));
+    let (state, provider) = build(Usd::from_dollars_f64(10.0)).await;
     let app = router(state.clone());
     let resp = app
         .oneshot(
@@ -155,7 +180,7 @@ async fn successful_request_bills_and_returns_cost() {
 #[tokio::test]
 async fn budget_blocked_request_is_429_without_egress() {
     // budget so small the worst-case reserve fails before any call
-    let (state, provider) = build(Usd::from_micros(1));
+    let (state, provider) = build(Usd::from_micros(1)).await;
     let app = router(state.clone());
     let resp = app
         .oneshot(

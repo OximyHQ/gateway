@@ -185,13 +185,14 @@ mod tests {
         }
     }
 
-    fn test_state() -> Arc<AppState<MockClock>> {
-        test_state_with_audit().0
+    async fn test_state() -> Arc<AppState<MockClock>> {
+        test_state_with_audit().await.0
     }
 
     /// Build a test state and return it alongside the concrete `MemoryAudit`
     /// handle (the federation shares this same sink) so tests can assert events.
-    fn test_state_with_audit() -> (Arc<AppState<MockClock>>, Arc<gateway_spine::MemoryAudit>) {
+    async fn test_state_with_audit() -> (Arc<AppState<MockClock>>, Arc<gateway_spine::MemoryAudit>)
+    {
         let mut ks = StaticKeyStore::new();
         ks.insert(VirtualKey {
             id: "key_mcp".into(),
@@ -205,12 +206,18 @@ mod tests {
             parent_id: None,
         });
         let audit = Arc::new(gateway_spine::MemoryAudit::new());
+        let store = Arc::new(
+            gateway_store::Store::connect("sqlite::memory:")
+                .await
+                .unwrap(),
+        );
         let state = Arc::new(AppState::with_parts(
             Arc::new(ks),
             Arc::new(MockClock::new(0)),
             crate::providers::ProviderRegistry::new(),
             Arc::new(crate::guard::empty_chain()),
             audit.clone() as Arc<dyn gateway_spine::AuditSink>,
+            store,
         ));
         (state, audit)
     }
@@ -236,7 +243,7 @@ mod tests {
 
     #[tokio::test]
     async fn mcp_without_auth_is_401() {
-        let app = crate::server::router(test_state());
+        let app = crate::server::router(test_state().await);
         let resp = app
             .oneshot(post_mcp(
                 json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}),
@@ -249,7 +256,7 @@ mod tests {
 
     #[tokio::test]
     async fn mcp_initialize_returns_server_info() {
-        let state = test_state();
+        let state = test_state().await;
         let app = crate::server::router(state);
         let resp = app
             .oneshot(post_mcp(
@@ -267,7 +274,7 @@ mod tests {
 
     #[tokio::test]
     async fn mcp_tools_list_returns_federated_tools() {
-        let state = test_state();
+        let state = test_state().await;
         with_server(&state).await;
         let app = crate::server::router(state);
         let resp = app
@@ -292,7 +299,7 @@ mod tests {
 
     #[tokio::test]
     async fn mcp_tools_list_is_acl_filtered() {
-        let state = test_state();
+        let state = test_state().await;
         with_server(&state).await;
         // Restrict key_mcp to only the echo tool.
         {
@@ -316,7 +323,7 @@ mod tests {
 
     #[tokio::test]
     async fn mcp_tools_call_dispatches_and_audits() {
-        let (state, audit) = test_state_with_audit();
+        let (state, audit) = test_state_with_audit().await;
         with_server(&state).await;
         let app = crate::server::router(state);
         let resp = app
@@ -344,7 +351,7 @@ mod tests {
 
     #[tokio::test]
     async fn mcp_unknown_method_is_method_not_found() {
-        let state = test_state();
+        let state = test_state().await;
         let app = crate::server::router(state);
         let resp = app
             .oneshot(post_mcp(

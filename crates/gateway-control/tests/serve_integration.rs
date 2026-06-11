@@ -84,7 +84,7 @@ fn gpt4o() -> ModelEntry {
 /// Build an AppState with a MockClock + EchoProvider + a valid key "sk-test".
 /// NOTE: AppState<MockClock> uses MockClock but `serve` needs SystemClock.
 /// We use `router` directly + bind our own listener here to allow MockClock.
-fn build_state() -> Arc<AppState<MockClock>> {
+async fn build_state() -> Arc<AppState<MockClock>> {
     let mut ks = StaticKeyStore::new();
     ks.insert(VirtualKey {
         id: "key_integration".into(),
@@ -105,12 +105,37 @@ fn build_state() -> Arc<AppState<MockClock>> {
             credentials: Arc::new(Credentials::new("fake")),
         },
     );
+    let store = Arc::new(
+        gateway_store::Store::connect("sqlite::memory:")
+            .await
+            .unwrap(),
+    );
+    store
+        .upsert_key(&gateway_store::StoredKey {
+            id: "key_integration".to_string(),
+            name: "key_integration".to_string(),
+            token_hash: VirtualKey::hash_secret("sk-test"),
+            token_prefix: "sk-test".to_string(),
+            budget_micros: Some(Usd::from_dollars_f64(100.0).micros()),
+            spent_micros: 0,
+            rpm: None,
+            tpm: None,
+            max_parallel: None,
+            model_allowlist: None,
+            expires_at_ms: None,
+            revoked: false,
+            parent_id: None,
+            created_at_ms: 0,
+        })
+        .await
+        .unwrap();
     let state = Arc::new(AppState::with_parts(
         Arc::new(ks),
         Arc::new(MockClock::new(0)),
         providers,
         Arc::new(empty_chain()),
         Arc::new(MemoryAudit::new()),
+        store,
     ));
     state.registry.write().unwrap().insert(gpt4o());
     state.ledger.set_budget(
@@ -125,7 +150,7 @@ fn build_state() -> Arc<AppState<MockClock>> {
 async fn start_server() -> (String, tokio::task::JoinHandle<()>) {
     use gateway_control::server::router;
 
-    let state = build_state();
+    let state = build_state().await;
     let app = router(state);
 
     // Bind port 0 → OS assigns an ephemeral port.
