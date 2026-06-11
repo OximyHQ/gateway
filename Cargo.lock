@@ -915,7 +915,7 @@ dependencies = [
 
 [[package]]
 name = "gateway-cache"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -936,7 +936,7 @@ dependencies = [
 
 [[package]]
 name = "gateway-config"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "chacha20poly1305",
@@ -954,7 +954,7 @@ dependencies = [
 
 [[package]]
 name = "gateway-control"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum 0.8.9",
@@ -980,7 +980,7 @@ dependencies = [
 
 [[package]]
 name = "gateway-dash"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "axum 0.8.9",
  "mime_guess",
@@ -995,7 +995,7 @@ dependencies = [
 
 [[package]]
 name = "gateway-guard"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "gateway-spine",
@@ -1010,7 +1010,7 @@ dependencies = [
 
 [[package]]
 name = "gateway-llm"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1028,7 +1028,7 @@ dependencies = [
 
 [[package]]
 name = "gateway-mcp"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "gateway-spine",
@@ -1044,7 +1044,7 @@ dependencies = [
 
 [[package]]
 name = "gateway-route"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -1060,7 +1060,7 @@ dependencies = [
 
 [[package]]
 name = "gateway-spine"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "hex",
  "rand 0.8.6",
@@ -1074,7 +1074,7 @@ dependencies = [
 
 [[package]]
 name = "gateway-telemetry"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "bytes",
  "gateway-spine",
@@ -2053,7 +2053,7 @@ checksum = "1a80800c0488c3a21695ea981a54918fbb37abf04f4d0720c453632255e2ff0e"
 
 [[package]]
 name = "oximy-gateway"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum 0.8.9",
