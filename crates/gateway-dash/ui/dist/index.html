@@ -1,22 +1,839 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Oximy Gateway</title>
-  </head>
-  <body>
-    <main id="app">
-      <h1>Oximy Gateway</h1>
-      <p>
-        Dashboard placeholder. The gateway is running. Use the API at
-        <a href="/v1/models">/v1/models</a> with your admin bearer token.
-      </p>
-      <p>
-        Endpoints: <code>POST /v1/chat/completions</code> &bull;
-        <code>GET /v1/models</code> &bull;
-        <code>GET /health</code>
-      </p>
-    </main>
-  </body>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Oximy Gateway</title>
+  <style>
+    /* ── CSS Variables ─────────────────────────────────────────────── */
+    :root {
+      --bg:          #0f1117;
+      --bg-card:     #1a1d27;
+      --bg-input:    #12141e;
+      --border:      #2a2d3d;
+      --text:        #e2e5f0;
+      --text-muted:  #8b90a8;
+      --accent:      #6c8ef5;
+      --accent-hover:#8aa3ff;
+      --green:       #4ade80;
+      --red:         #f87171;
+      --warn-bg:     #3a2c1a;
+      --warn-border: #c57c2a;
+      --warn-text:   #f0c97a;
+      --radius:      8px;
+      --font: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      --mono: ui-monospace, "Cascadia Code", "Fira Code", Menlo, Consolas, monospace;
+    }
+
+    /* ── Reset & Base ──────────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; }
+    body {
+      font-family: var(--font);
+      background: var(--bg);
+      color: var(--text);
+      font-size: 14px;
+      line-height: 1.5;
+    }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { color: var(--accent-hover); }
+
+    /* ── Layout ────────────────────────────────────────────────────── */
+    #app {
+      display: flex;
+      flex-direction: column;
+      min-height: 100vh;
+    }
+
+    /* ── Top Bar ───────────────────────────────────────────────────── */
+    #topbar {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 0 20px;
+      height: 52px;
+      background: var(--bg-card);
+      border-bottom: 1px solid var(--border);
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+    #topbar .logo {
+      font-weight: 700;
+      font-size: 15px;
+      letter-spacing: -0.3px;
+      color: var(--text);
+    }
+    #topbar .logo span { color: var(--accent); }
+    #version-badge {
+      font-size: 11px;
+      color: var(--text-muted);
+      background: var(--bg-input);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 1px 6px;
+    }
+    #health-indicator {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-left: auto;
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+    #health-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--text-muted);
+      flex-shrink: 0;
+      transition: background 0.3s;
+    }
+    #health-dot.ok    { background: var(--green); }
+    #health-dot.error { background: var(--red); }
+
+    /* ── Warning Banner ────────────────────────────────────────────── */
+    #warn-banner {
+      display: none;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 20px;
+      background: var(--warn-bg);
+      border-bottom: 1px solid var(--warn-border);
+      color: var(--warn-text);
+      font-size: 13px;
+    }
+    #warn-banner.visible { display: flex; }
+
+    /* ── Auth Section ──────────────────────────────────────────────── */
+    #auth-section {
+      padding: 12px 20px;
+      background: var(--bg-card);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    #auth-section label {
+      font-size: 12px;
+      color: var(--text-muted);
+      white-space: nowrap;
+    }
+    #bearer-input {
+      flex: 1;
+      min-width: 200px;
+      max-width: 480px;
+      padding: 6px 10px;
+      background: var(--bg-input);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      color: var(--text);
+      font-family: var(--mono);
+      font-size: 13px;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    #bearer-input:focus { border-color: var(--accent); }
+    #bearer-input::placeholder { color: var(--text-muted); }
+
+    /* ── Buttons ───────────────────────────────────────────────────── */
+    .btn {
+      padding: 6px 16px;
+      border-radius: var(--radius);
+      border: none;
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 500;
+      transition: background 0.15s, opacity 0.15s;
+      white-space: nowrap;
+    }
+    .btn-primary {
+      background: var(--accent);
+      color: #fff;
+    }
+    .btn-primary:hover { background: var(--accent-hover); }
+    .btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
+    .btn-ghost {
+      background: transparent;
+      color: var(--text-muted);
+      border: 1px solid var(--border);
+    }
+    .btn-ghost:hover { color: var(--text); border-color: var(--text-muted); }
+
+    #key-status {
+      font-size: 12px;
+      color: var(--green);
+      margin-left: 4px;
+    }
+    #key-status.empty { color: var(--text-muted); }
+
+    /* ── Tabs ──────────────────────────────────────────────────────── */
+    #tabs {
+      display: flex;
+      gap: 0;
+      padding: 0 20px;
+      background: var(--bg-card);
+      border-bottom: 1px solid var(--border);
+    }
+    .tab-btn {
+      padding: 12px 18px;
+      background: none;
+      border: none;
+      border-bottom: 2px solid transparent;
+      color: var(--text-muted);
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: color 0.15s, border-color 0.15s;
+    }
+    .tab-btn:hover { color: var(--text); }
+    .tab-btn.active {
+      color: var(--accent);
+      border-bottom-color: var(--accent);
+    }
+
+    /* ── Tab Panels ────────────────────────────────────────────────── */
+    #main-content {
+      flex: 1;
+      overflow: auto;
+    }
+    .tab-panel {
+      display: none;
+      padding: 24px 20px;
+      max-width: 1100px;
+    }
+    .tab-panel.active { display: block; }
+
+    /* ── Section Headings ──────────────────────────────────────────── */
+    .panel-title {
+      font-size: 16px;
+      font-weight: 600;
+      margin-bottom: 16px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .panel-title .refresh-btn {
+      margin-left: auto;
+      font-size: 12px;
+    }
+
+    /* ── Cards ─────────────────────────────────────────────────────── */
+    .card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 16px;
+      margin-bottom: 16px;
+    }
+
+    /* ── Tables ────────────────────────────────────────────────────── */
+    .data-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+    .data-table thead th {
+      text-align: left;
+      padding: 8px 12px;
+      background: var(--bg-input);
+      border-bottom: 1px solid var(--border);
+      color: var(--text-muted);
+      font-weight: 600;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .data-table tbody tr:hover { background: rgba(108,142,245,0.04); }
+    .data-table tbody td {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--border);
+      color: var(--text);
+      vertical-align: top;
+    }
+    .data-table tbody tr:last-child td { border-bottom: none; }
+
+    /* ── Status / Empty States ─────────────────────────────────────── */
+    .state-msg {
+      padding: 32px;
+      text-align: center;
+      color: var(--text-muted);
+      font-size: 13px;
+    }
+    .state-msg.error { color: var(--red); }
+
+    /* ── Playground ────────────────────────────────────────────────── */
+    .form-row {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      margin-bottom: 14px;
+    }
+    .form-row label {
+      font-size: 12px;
+      color: var(--text-muted);
+      font-weight: 500;
+    }
+    select, textarea {
+      background: var(--bg-input);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      color: var(--text);
+      font-family: var(--font);
+      font-size: 13px;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    select:focus, textarea:focus { border-color: var(--accent); }
+    select {
+      padding: 7px 10px;
+      -webkit-appearance: none;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%238b90a8' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: right 10px center;
+      padding-right: 28px;
+    }
+    textarea {
+      padding: 8px 10px;
+      resize: vertical;
+      line-height: 1.5;
+    }
+    .model-select { width: 100%; max-width: 400px; }
+    #system-prompt { min-height: 70px; width: 100%; }
+    #user-prompt   { min-height: 100px; width: 100%; }
+
+    #playground-send-row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+
+    #response-card {
+      display: none;
+    }
+    #response-card.visible { display: block; }
+
+    .response-meta {
+      display: flex;
+      gap: 16px;
+      flex-wrap: wrap;
+      margin-bottom: 10px;
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+    .response-meta span strong { color: var(--text); }
+
+    #response-text {
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-family: var(--font);
+      font-size: 13px;
+      line-height: 1.65;
+      background: var(--bg-input);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 12px;
+      min-height: 60px;
+    }
+
+    /* ── Metrics ───────────────────────────────────────────────────── */
+    #metrics-raw {
+      background: var(--bg-input);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 12px;
+      font-family: var(--mono);
+      font-size: 12px;
+      line-height: 1.6;
+      color: var(--text-muted);
+      overflow-x: auto;
+      white-space: pre;
+      max-height: 400px;
+      overflow-y: auto;
+    }
+
+    /* ── Utility ───────────────────────────────────────────────────── */
+    .mono { font-family: var(--mono); }
+    .muted { color: var(--text-muted); }
+    .badge {
+      display: inline-block;
+      padding: 1px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 600;
+    }
+    .badge-provider {
+      background: rgba(108,142,245,0.15);
+      color: var(--accent);
+    }
+    .spinner {
+      display: inline-block;
+      width: 14px;
+      height: 14px;
+      border: 2px solid var(--border);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      vertical-align: middle;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .hidden { display: none !important; }
+  </style>
+</head>
+<body>
+<div id="app">
+
+  <!-- ── Top Bar ───────────────────────────────────────────────────── -->
+  <header id="topbar">
+    <div class="logo">Oximy <span>Gateway</span></div>
+    <div id="version-badge">—</div>
+    <div id="health-indicator">
+      <div id="health-dot"></div>
+      <span id="health-label">checking…</span>
+    </div>
+  </header>
+
+  <!-- ── Warning Banner ────────────────────────────────────────────── -->
+  <div id="warn-banner">
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path d="M8 1.5L1 14.5h14L8 1.5z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>
+      <path d="M8 6v4M8 11.5v.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+    </svg>
+    No API key set — enter your bearer token below to use the dashboard.
+  </div>
+
+  <!-- ── Auth Section ──────────────────────────────────────────────── -->
+  <div id="auth-section">
+    <label for="bearer-input">Bearer token</label>
+    <input
+      id="bearer-input"
+      type="password"
+      placeholder="sk-…"
+      autocomplete="off"
+      spellcheck="false"
+    />
+    <button class="btn btn-primary" id="save-key-btn">Save</button>
+    <button class="btn btn-ghost" id="clear-key-btn">Clear</button>
+    <span id="key-status" class="empty">No key saved</span>
+  </div>
+
+  <!-- ── Tabs ──────────────────────────────────────────────────────── -->
+  <nav id="tabs" role="tablist">
+    <button class="tab-btn active" role="tab" data-tab="models"     aria-selected="true">Models</button>
+    <button class="tab-btn"        role="tab" data-tab="playground" aria-selected="false">Playground</button>
+    <button class="tab-btn"        role="tab" data-tab="metrics"    aria-selected="false">Metrics</button>
+  </nav>
+
+  <!-- ── Main Content ──────────────────────────────────────────────── -->
+  <main id="main-content">
+
+    <!-- Models Panel -->
+    <section id="panel-models" class="tab-panel active" role="tabpanel">
+      <div class="panel-title">
+        Models
+        <button class="btn btn-ghost refresh-btn" id="models-refresh">Refresh</button>
+      </div>
+      <div class="card" id="models-card">
+        <div id="models-body">
+          <div class="state-msg">Loading…</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Playground Panel -->
+    <section id="panel-playground" class="tab-panel" role="tabpanel">
+      <div class="panel-title">Playground</div>
+      <div class="card">
+        <div class="form-row">
+          <label for="pg-model">Model</label>
+          <select id="pg-model" class="model-select">
+            <option value="">— select a model —</option>
+          </select>
+        </div>
+        <div class="form-row">
+          <label for="system-prompt">System prompt <span class="muted">(optional)</span></label>
+          <textarea id="system-prompt" placeholder="You are a helpful assistant."></textarea>
+        </div>
+        <div class="form-row">
+          <label for="user-prompt">User message</label>
+          <textarea id="user-prompt" placeholder="Ask anything…"></textarea>
+        </div>
+        <div id="playground-send-row">
+          <button class="btn btn-primary" id="pg-send-btn">Send</button>
+          <span id="pg-spinner" class="spinner hidden"></span>
+          <span id="pg-error" class="muted" style="color:var(--red);font-size:12px;"></span>
+        </div>
+      </div>
+
+      <div class="card" id="response-card">
+        <div class="response-meta" id="response-meta"></div>
+        <div id="response-text"></div>
+      </div>
+    </section>
+
+    <!-- Metrics Panel -->
+    <section id="panel-metrics" class="tab-panel" role="tabpanel">
+      <div class="panel-title">
+        Metrics
+        <button class="btn btn-ghost refresh-btn" id="metrics-refresh">Refresh</button>
+      </div>
+      <div class="card" id="metrics-table-card">
+        <div id="metrics-table-body">
+          <div class="state-msg">Loading…</div>
+        </div>
+      </div>
+      <div class="panel-title" style="margin-top:8px;font-size:13px;color:var(--text-muted);">
+        Raw Prometheus output
+      </div>
+      <div class="card">
+        <pre id="metrics-raw">—</pre>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<script>
+/* ── Helpers ─────────────────────────────────────────────────────── */
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+
+/* ── Bearer key (localStorage) ──────────────────────────────────── */
+const KEY_NAME = 'gw_bearer_key';
+let bearerKey = localStorage.getItem(KEY_NAME) || '';
+
+function applyKeyState() {
+  const inp = $('bearer-input');
+  const status = $('key-status');
+  const warn = $('warn-banner');
+  if (bearerKey) {
+    inp.value = bearerKey;
+    status.textContent = 'Key saved ✓';
+    status.className = '';
+    warn.classList.remove('visible');
+  } else {
+    inp.value = '';
+    status.textContent = 'No key saved';
+    status.className = 'empty';
+    warn.classList.add('visible');
+  }
+}
+
+$('save-key-btn').addEventListener('click', () => {
+  const val = $('bearer-input').value.trim();
+  if (!val) return;
+  bearerKey = val;
+  localStorage.setItem(KEY_NAME, val);
+  applyKeyState();
+  loadModels();
+});
+
+$('clear-key-btn').addEventListener('click', () => {
+  bearerKey = '';
+  localStorage.removeItem(KEY_NAME);
+  applyKeyState();
+});
+
+applyKeyState();
+
+/* ── Fetch wrapper with bearer ───────────────────────────────────── */
+async function apiFetch(path, opts = {}) {
+  const headers = { ...(opts.headers || {}) };
+  if (bearerKey) headers['Authorization'] = 'Bearer ' + bearerKey;
+  const res = await fetch(path, { ...opts, headers });
+  return res;
+}
+
+/* ── Health polling ──────────────────────────────────────────────── */
+async function pollHealth() {
+  const dot   = $('health-dot');
+  const label = $('health-label');
+  const badge = $('version-badge');
+  try {
+    const res  = await fetch('/health');
+    const data = await res.json();
+    if (res.ok && data.status === 'ok') {
+      dot.className   = 'ok';
+      label.textContent = 'Healthy';
+      if (data.version) badge.textContent = 'v' + data.version;
+    } else {
+      dot.className   = 'error';
+      label.textContent = 'Degraded';
+    }
+  } catch (_) {
+    dot.className   = 'error';
+    label.textContent = 'Unreachable';
+  }
+}
+
+pollHealth();
+setInterval(pollHealth, 10_000);
+
+/* ── Tab switching ───────────────────────────────────────────────── */
+const tabBtns   = document.querySelectorAll('.tab-btn');
+const tabPanels = document.querySelectorAll('.tab-panel');
+
+tabBtns.forEach(btn => {
+  btn.addEventListener('click', () => {
+    const target = btn.dataset.tab;
+    tabBtns.forEach(b => {
+      b.classList.toggle('active', b.dataset.tab === target);
+      b.setAttribute('aria-selected', b.dataset.tab === target ? 'true' : 'false');
+    });
+    tabPanels.forEach(p => p.classList.toggle('active', p.id === 'panel-' + target));
+    if (target === 'models')     loadModels();
+    if (target === 'metrics')    loadMetrics();
+  });
+});
+
+/* ── Models view ────────────────────────────────────────────────── */
+let modelsCache = [];
+
+async function loadModels() {
+  const body = $('models-body');
+  body.innerHTML = '<div class="state-msg"><span class="spinner"></span> Loading…</div>';
+
+  if (!bearerKey) {
+    body.innerHTML = '<div class="state-msg error">Set API key above to view models.</div>';
+    return;
+  }
+
+  try {
+    const res  = await apiFetch('/v1/models');
+    if (res.status === 401) {
+      body.innerHTML = '<div class="state-msg error">Set API key above (401 Unauthorized).</div>';
+      return;
+    }
+    if (!res.ok) {
+      body.innerHTML = `<div class="state-msg error">HTTP ${res.status}</div>`;
+      return;
+    }
+    const data = await res.json();
+    modelsCache = data.data || [];
+    renderModels(modelsCache);
+    populateModelSelect(modelsCache);
+  } catch (e) {
+    body.innerHTML = `<div class="state-msg error">Error: ${esc(e.message)}</div>`;
+  }
+}
+
+function fmtMicros(micros) {
+  if (micros == null) return '—';
+  /* micros are per-million tokens, convert to dollars per million tokens */
+  const dollars = micros / 1_000_000;
+  return '$' + dollars.toFixed(4);
+}
+
+function renderModels(models) {
+  const body = $('models-body');
+  if (!models.length) {
+    body.innerHTML = '<div class="state-msg">No models registered.</div>';
+    return;
+  }
+  const rows = models.map(m => `
+    <tr>
+      <td class="mono">${esc(m.id)}</td>
+      <td><span class="badge badge-provider">${esc(m.owned_by || m.provider || '—')}</span></td>
+      <td class="mono">${fmtMicros(m.pricing?.input_per_mtok_micros)}</td>
+      <td class="mono">${fmtMicros(m.pricing?.output_per_mtok_micros)}</td>
+      <td class="muted">${m.context_window ? m.context_window.toLocaleString() : '—'}</td>
+    </tr>
+  `).join('');
+  body.innerHTML = `
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>Provider</th>
+          <th>Input / MTok</th>
+          <th>Output / MTok</th>
+          <th>Context</th>
+        </tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>
+  `;
+}
+
+function populateModelSelect(models) {
+  const sel = $('pg-model');
+  const prev = sel.value;
+  sel.innerHTML = '<option value="">— select a model —</option>' +
+    models.map(m => `<option value="${esc(m.id)}" ${m.id===prev?'selected':''}>${esc(m.id)}</option>`).join('');
+}
+
+$('models-refresh').addEventListener('click', loadModels);
+
+/* ── Playground view ─────────────────────────────────────────────── */
+$('pg-send-btn').addEventListener('click', sendPlayground);
+
+async function sendPlayground() {
+  const model  = $('pg-model').value.trim();
+  const sys    = $('system-prompt').value.trim();
+  const user   = $('user-prompt').value.trim();
+  const errEl  = $('pg-error');
+  const spin   = $('pg-spinner');
+  const sendBtn = $('pg-send-btn');
+
+  errEl.textContent = '';
+  $('response-card').classList.remove('visible');
+
+  if (!bearerKey) { errEl.textContent = 'Set your API key first.'; return; }
+  if (!model)     { errEl.textContent = 'Select a model.'; return; }
+  if (!user)      { errEl.textContent = 'Enter a user message.'; return; }
+
+  const messages = [];
+  if (sys)  messages.push({ role: 'system',    content: sys });
+  messages.push(          { role: 'user',      content: user });
+
+  sendBtn.disabled = true;
+  spin.classList.remove('hidden');
+
+  try {
+    const res = await apiFetch('/v1/chat/completions', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ model, messages, stream: false }),
+    });
+
+    const overhead = res.headers.get('x-overhead-duration-ms') || '—';
+
+    if (res.status === 401) {
+      errEl.textContent = '401 Unauthorized — check your API key.';
+      return;
+    }
+    if (!res.ok) {
+      const txt = await res.text();
+      errEl.textContent = `HTTP ${res.status}: ${txt.slice(0, 200)}`;
+      return;
+    }
+
+    const data = await res.json();
+    const reply  = data.choices?.[0]?.message?.content ?? '';
+    const usage  = data.usage ?? {};
+    const cost   = usage.cost != null ? '$' + usage.cost.toFixed(6) : '—';
+    const input  = usage.prompt_tokens     ?? usage.input_tokens  ?? '—';
+    const output = usage.completion_tokens ?? usage.output_tokens ?? '—';
+
+    $('response-meta').innerHTML = `
+      <span><strong>Model:</strong> ${esc(data.model || model)}</span>
+      <span><strong>Cost:</strong> ${esc(cost)}</span>
+      <span><strong>Input tokens:</strong> ${esc(String(input))}</span>
+      <span><strong>Output tokens:</strong> ${esc(String(output))}</span>
+      <span><strong>Overhead:</strong> ${esc(overhead)} ms</span>
+    `;
+    $('response-text').textContent = reply;
+    $('response-card').classList.add('visible');
+
+  } catch (e) {
+    errEl.textContent = 'Request failed: ' + e.message;
+  } finally {
+    sendBtn.disabled = false;
+    spin.classList.add('hidden');
+  }
+}
+
+/* ── Metrics view ────────────────────────────────────────────────── */
+async function loadMetrics() {
+  const tableBody = $('metrics-table-body');
+  const rawEl     = $('metrics-raw');
+
+  tableBody.innerHTML = '<div class="state-msg"><span class="spinner"></span> Loading…</div>';
+  rawEl.textContent   = '—';
+
+  if (!bearerKey) {
+    tableBody.innerHTML = '<div class="state-msg error">Set API key above to view metrics.</div>';
+    return;
+  }
+
+  try {
+    const res = await apiFetch('/metrics');
+    if (res.status === 401) {
+      tableBody.innerHTML = '<div class="state-msg error">Set API key above (401 Unauthorized).</div>';
+      return;
+    }
+    if (!res.ok) {
+      tableBody.innerHTML = `<div class="state-msg error">HTTP ${res.status}</div>`;
+      return;
+    }
+
+    const text = await res.text();
+    rawEl.textContent = text;
+    renderMetricsTable(text);
+
+  } catch (e) {
+    tableBody.innerHTML = `<div class="state-msg error">Error: ${esc(e.message)}</div>`;
+  }
+}
+
+/* Parse Prometheus text format — extract gateway_requests_total and
+   gateway_cost_micros_total lines (skip comments and HELP/TYPE lines). */
+function parsePrometheus(text) {
+  const rows = [];
+  for (const line of text.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    if (!trimmed.startsWith('gateway_requests_total') &&
+        !trimmed.startsWith('gateway_cost_micros_total')) continue;
+
+    const braceOpen  = trimmed.indexOf('{');
+    const braceClose = trimmed.indexOf('}');
+    const spaceAfterClose = trimmed.indexOf(' ', braceClose);
+
+    let metricName, labels, value;
+    if (braceOpen === -1) {
+      /* no label set — plain metric */
+      const sp = trimmed.indexOf(' ');
+      metricName = sp === -1 ? trimmed : trimmed.slice(0, sp);
+      labels     = '';
+      value      = sp === -1 ? '' : trimmed.slice(sp + 1).split(' ')[0];
+    } else {
+      metricName = trimmed.slice(0, braceOpen);
+      labels     = trimmed.slice(braceOpen + 1, braceClose);
+      value      = spaceAfterClose === -1 ? '' : trimmed.slice(spaceAfterClose + 1).split(' ')[0];
+    }
+    rows.push({ metricName, labels, value });
+  }
+  return rows;
+}
+
+function renderMetricsTable(text) {
+  const tableBody = $('metrics-table-body');
+  const rows = parsePrometheus(text);
+
+  if (!rows.length) {
+    tableBody.innerHTML = '<div class="state-msg">No gateway_requests_total or gateway_cost_micros_total series found yet.</div>';
+    return;
+  }
+
+  const trs = rows.map(r => `
+    <tr>
+      <td class="mono">${esc(r.metricName)}</td>
+      <td class="mono muted" style="font-size:12px;">${esc(r.labels)}</td>
+      <td class="mono" style="text-align:right;">${esc(r.value)}</td>
+    </tr>
+  `).join('');
+
+  tableBody.innerHTML = `
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Metric</th>
+          <th>Labels</th>
+          <th style="text-align:right;">Value</th>
+        </tr>
+      </thead>
+      <tbody>${trs}</tbody>
+    </table>
+  `;
+}
+
+$('metrics-refresh').addEventListener('click', loadMetrics);
+
+/* ── Bootstrap ───────────────────────────────────────────────────── */
+loadModels();
+</script>
+</body>
 </html>
