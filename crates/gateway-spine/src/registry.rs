@@ -58,6 +58,12 @@ impl ModelRegistry {
         v.sort();
         v
     }
+
+    /// Cloned snapshot of all entries (used when bulk-inserting one registry's
+    /// contents into another, e.g. merging the bundled catalog into AppState).
+    pub fn all_entries(&self) -> Vec<ModelEntry> {
+        self.entries.values().cloned().collect()
+    }
 }
 
 #[cfg(test)]
