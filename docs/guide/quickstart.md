@@ -15,7 +15,7 @@ brew install oximyhq/tap/oximy-gateway
 ### Linux / macOS (installer script)
 
 ```bash
-curl -fsSL https://oximy.com/install/gateway | sh
+curl -fsSL https://raw.githubusercontent.com/OximyHQ/gateway/main/install.sh | sh
 ```
 
 This installs the `oximy-gateway` binary to `~/.local/bin` (or `/usr/local/bin`

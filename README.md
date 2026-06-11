@@ -59,7 +59,7 @@ claw back a shipped OSS feature. One-command migration from LiteLLM/Portkey.
 brew install oximyhq/tap/oximy-gateway
 
 # Linux / macOS (installer script)
-curl -fsSL https://oximy.com/install/gateway | sh
+curl -fsSL https://raw.githubusercontent.com/OximyHQ/gateway/main/install.sh | sh
 
 # Cargo (from source)
 cargo install --git https://github.com/OximyHQ/gateway oximy-gateway
