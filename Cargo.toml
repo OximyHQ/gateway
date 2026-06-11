@@ -23,6 +23,7 @@ gateway-guard = { path = "crates/gateway-guard" }
 gateway-config = { path = "crates/gateway-config" }
 gateway-control = { path = "crates/gateway-control" }
 gateway-dash = { path = "crates/gateway-dash" }
+gateway-store = { path = "crates/gateway-store" }
 
 # Shared third-party deps (pinned once, inherited via `workspace = true`)
 tokio = { version = "1", features = ["full"] }
