@@ -223,8 +223,8 @@ async fn chat_completions<C: Clock + 'static>(
                     latency_ms,
                     ttft_ms: None,
                     status: 200,
-                    served_by: String::new(),
-                    fallback_fired: false,
+                    served_by: completed.served_by.clone(),
+                    fallback_fired: completed.fallback_fired,
                     cache_status: CacheStatus::Miss,
                     capture_mode: CaptureMode::Metadata,
                     request_text: None,
@@ -240,6 +240,17 @@ async fn chat_completions<C: Clock + 'static>(
                 resp.headers_mut().insert(
                     "x-idempotency-key",
                     header::HeaderValue::from_str(&completed.idempotency_key).unwrap(),
+                );
+                if let Ok(v) = header::HeaderValue::from_str(&completed.served_by) {
+                    resp.headers_mut().insert("x-served-by", v);
+                }
+                resp.headers_mut().insert(
+                    "x-fallback-fired",
+                    header::HeaderValue::from_static(if completed.fallback_fired {
+                        "true"
+                    } else {
+                        "false"
+                    }),
                 );
                 resp
             }

@@ -16,9 +16,11 @@ use std::sync::Arc;
 use futures::stream::{Stream, StreamExt};
 use gateway_guard::{GuardContext, GuardStage, GuardVerdict};
 use gateway_llm::{ChatRequest, ChatResponse, ContentPart, ProviderError, Role, StreamDelta};
+use gateway_route::{Route, RouteError, Router};
 use gateway_spine::{AuditEvent, ReservationId, Usd, VirtualKey};
 
 use crate::error::GatewayError;
+use crate::route_exec::RegistryExecutor;
 use crate::state::AppState;
 
 /// A completed non-streaming call: the provider response plus the authoritative
@@ -28,6 +30,12 @@ pub struct Completed {
     pub response: ChatResponse,
     pub cost: Usd,
     pub idempotency_key: String,
+    /// `provider_id/model` of the target that actually served the response
+    /// (surfaced as the `x-served-by` header).
+    pub served_by: String,
+    /// Whether the router fell back to a non-primary target (surfaced as the
+    /// `x-fallback-fired` header).
+    pub fallback_fired: bool,
 }
 
 /// The output of a streaming run: the wrapped delta stream (commit-on-terminal)
@@ -74,6 +82,35 @@ impl<C: gateway_spine::Clock> AppState<C> {
             ..Default::default()
         };
         Ok(entry.price.cost(&usage))
+    }
+
+    /// The route used to dispatch `model`. Returns a configured multi-target
+    /// route override if one is installed for this model id; otherwise the
+    /// default single target = (`provider_id`, `model`) — behaviour identical to
+    /// the pre-routing direct dispatch.
+    fn route_for(&self, model: &str, provider_id: &str) -> Route {
+        self.routes
+            .read()
+            .unwrap()
+            .get(model)
+            .cloned()
+            .unwrap_or_else(|| Route::single(provider_id, model))
+    }
+}
+
+/// Map a `gateway_route::RouteError` to the HTTP-facing `GatewayError`.
+/// A terminal provider error keeps its original status mapping; exhaustion /
+/// no-targets become a 502 (we tried and could not get an upstream response).
+fn route_error_to_gateway(e: RouteError) -> GatewayError {
+    match e {
+        RouteError::TerminalError(pe) => GatewayError::Provider(pe),
+        RouteError::NoTargets | RouteError::AllTargetsExhausted { .. } => {
+            GatewayError::Provider(ProviderError::Upstream {
+                status: 502,
+                body: e.to_string(),
+            })
+        }
+        RouteError::Internal(msg) => GatewayError::BadRequest(msg),
     }
 }
 
@@ -134,7 +171,7 @@ pub struct Gateway;
 impl Gateway {
     /// Run one non-streaming chat call end-to-end. `key` is the already
     /// authenticated `VirtualKey` (the handler resolves it via `auth`).
-    pub async fn run<C: gateway_spine::Clock>(
+    pub async fn run<C: gateway_spine::Clock + 'static>(
         state: &AppState<C>,
         key: &VirtualKey,
         req: &ChatRequest,
@@ -164,8 +201,10 @@ impl Gateway {
             ));
         }
 
-        // 2. resolve the egress deployment for this model's provider (unknown
-        //    model → 400 here, before any acquisition).
+        // 2. resolve the egress provider for this model (unknown model → 400
+        //    here, before any acquisition) and confirm it has a deployment. The
+        //    Router resolves the per-target deployment at egress; this is the
+        //    fast-fail validation for the request's own model.
         let provider_id = {
             let reg = state.registry.read().unwrap();
             reg.get(model).map(|e| e.provider.clone()).ok_or_else(|| {
@@ -174,9 +213,11 @@ impl Gateway {
                 })
             })?
         };
-        let deployment = state.providers.get(&provider_id).cloned().ok_or_else(|| {
-            GatewayError::BadRequest(format!("no egress configured for provider {provider_id}"))
-        })?;
+        if state.providers.get(&provider_id).is_none() {
+            return Err(GatewayError::BadRequest(format!(
+                "no egress configured for provider {provider_id}"
+            )));
+        }
 
         let est_tokens = estimate_tokens(req);
 
@@ -247,31 +288,42 @@ impl Gateway {
             GuardVerdict::Allow | GuardVerdict::Flag { .. } => {}
         }
 
-        // 6. egress — mint ONE idempotency key (no-double-billing) and call the
-        //    provider. Any error releases the reservation + parallel slot.
+        // 6. egress — mint ONE idempotency key (no-double-billing) and dispatch
+        //    through the Router. For a model with a single deployment (the common
+        //    case) the route is a single target and behaviour is unchanged; a
+        //    configured multi-target route adds failover/retry. The same
+        //    idempotency key is reused across every attempt (held by the executor)
+        //    so the spine bills once. Any terminal failure releases the
+        //    reservation + parallel slot.
         let idempotency_key = uuid::Uuid::new_v4().to_string();
-        let result = deployment
-            .provider
-            .chat(req, &deployment.credentials, &idempotency_key)
-            .await;
-        let mut response = match result {
-            Ok(r) => r,
+        let route = state.route_for(model, &provider_id);
+        let executor = RegistryExecutor::new(&state.providers, idempotency_key.clone());
+        let router = Router::new(route, state.clock.clone());
+        let (response, meta) = match router.call(&executor, req).await {
+            Ok(ok) => ok,
             Err(e) => {
                 let _ = state.ledger.release(reservation);
                 state.limiter.release_parallel(&key.id);
-                Self::audit(state, key, "request.error", model, "error", &e.to_string());
-                return Err(GatewayError::Provider(e));
+                let ge = route_error_to_gateway(e);
+                Self::audit(state, key, "request.error", model, "error", &ge.to_string());
+                return Err(ge);
             }
         };
+        let mut response = response;
+        let served_by = format!("{}/{}", meta.provider_id, meta.model);
+        let fallback_fired = meta.used_fallback || meta.hedge_won;
 
         // 7. commit ACTUAL cost from provider usage (true-up). Cost is computed
-        //    from the registry — never guessed. Then release the parallel slot.
-        //    Cost is committed regardless of the PostResponse guard verdict: the
-        //    provider was billed, so we record the true spend even if we then
-        //    block/redact the content the caller sees.
+        //    from the registry for the model that ACTUALLY served the request
+        //    (a failover target may price differently) — never guessed. Then
+        //    release the parallel slot. Cost is committed regardless of the
+        //    PostResponse guard verdict: the provider was billed, so we record
+        //    the true spend even if we then block/redact the content.
         let actual_cost = {
             let reg = state.registry.read().unwrap();
-            reg.cost(model, &response.usage).unwrap_or(Usd::ZERO)
+            reg.cost(&meta.model, &response.usage)
+                .or_else(|| reg.cost(model, &response.usage))
+                .unwrap_or(Usd::ZERO)
         };
         state
             .ledger
@@ -313,6 +365,8 @@ impl Gateway {
             response,
             cost: actual_cost,
             idempotency_key,
+            served_by,
+            fallback_fired,
         })
     }
 
@@ -1121,5 +1175,166 @@ mod tests {
             Usd::ZERO,
             "no stranded reservation"
         );
+    }
+
+    // ── Routing integration ───────────────────────────────────────────────────
+
+    /// A provider that fails its first `chat` with a retryable error, then
+    /// succeeds — used to prove the router fails over to the backup target.
+    struct FlakyProvider {
+        id: &'static str,
+        calls: AtomicUsize,
+        fail_first: bool,
+    }
+    #[async_trait]
+    impl Provider for FlakyProvider {
+        fn id(&self) -> &str {
+            self.id
+        }
+        fn capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities {
+                supports_streaming: false,
+                supports_tools: false,
+                supports_vision: false,
+                supports_idempotency: true,
+            }
+        }
+        async fn chat(
+            &self,
+            req: &ChatRequest,
+            _creds: &Credentials,
+            _idempotency_key: &str,
+        ) -> Result<ChatResponse, ProviderError> {
+            let n = self.calls.fetch_add(1, Ordering::SeqCst);
+            if self.fail_first && n == 0 {
+                return Err(ProviderError::Upstream {
+                    status: 503,
+                    body: "service unavailable".into(),
+                });
+            }
+            Ok(ChatResponse {
+                model: req.model.clone(),
+                content: vec![ContentPart::text("ok")],
+                tool_calls: vec![],
+                finish_reason: FinishReason::Stop,
+                usage: TokenUsage {
+                    input_tokens: 100,
+                    output_tokens: 50,
+                    ..Default::default()
+                },
+                provider_response_id: None,
+            })
+        }
+        async fn stream(
+            &self,
+            _req: &ChatRequest,
+            _creds: &Credentials,
+            _idempotency_key: &str,
+        ) -> Result<DeltaStream, ProviderError> {
+            unreachable!()
+        }
+    }
+
+    #[tokio::test]
+    async fn failover_route_uses_backup_on_retryable_error() {
+        let primary = Arc::new(FlakyProvider {
+            id: "primary",
+            calls: AtomicUsize::new(0),
+            fail_first: true,
+        });
+        let backup = Arc::new(FlakyProvider {
+            id: "backup",
+            calls: AtomicUsize::new(0),
+            fail_first: false,
+        });
+
+        let mut ks = StaticKeyStore::new();
+        ks.insert(key(
+            Some(Usd::from_dollars_f64(1.0)),
+            None,
+            RateLimits::default(),
+        ));
+        let mut providers = ProviderRegistry::new();
+        providers.insert(
+            "primary",
+            Deployment {
+                provider: primary.clone(),
+                credentials: Arc::new(Credentials::new("p")),
+            },
+        );
+        providers.insert(
+            "backup",
+            Deployment {
+                provider: backup.clone(),
+                credentials: Arc::new(Credentials::new("b")),
+            },
+        );
+        let state = AppState::with_parts(
+            Arc::new(ks),
+            Arc::new(MockClock::new(0)),
+            providers,
+            Arc::new(empty_chain()),
+            Arc::new(MemoryAudit::new()),
+        );
+        // The request model is "gpt-4o" served by the "primary" provider.
+        let mut entry = gpt4o();
+        entry.provider = "primary".into();
+        state.registry.write().unwrap().insert(entry);
+        state
+            .ledger
+            .set_budget("key_1", Some(Usd::from_dollars_f64(1.0)), Usd::ZERO);
+
+        // Install a failover route: primary → backup, no backoff in tests.
+        let mut route = Route::new(
+            vec![
+                gateway_route::RouteTarget::new("primary", "gpt-4o"),
+                gateway_route::RouteTarget::new("backup", "gpt-4o"),
+            ],
+            gateway_route::Strategy::Failover,
+        );
+        route.failure_threshold = 1;
+        route.base_backoff_ms = 0;
+        route.max_attempts = 4;
+        state.set_route("gpt-4o", route);
+
+        let k = key(
+            Some(Usd::from_dollars_f64(1.0)),
+            None,
+            RateLimits::default(),
+        );
+        let done = Gateway::run(&state, &k, &chat_req()).await.unwrap();
+
+        // Primary failed once; backup served the response.
+        assert_eq!(primary.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(backup.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(done.served_by, "backup/gpt-4o");
+        assert!(done.fallback_fired, "fallback should have fired");
+        // Cost trued up (100 in + 50 out on gpt-4o pricing) and committed once.
+        assert_eq!(done.cost, Usd::from_micros(750));
+        assert_eq!(state.ledger.spent("key_1"), Usd::from_micros(750));
+        assert_eq!(state.ledger.reserved("key_1"), Usd::ZERO);
+    }
+
+    #[tokio::test]
+    async fn single_deployment_model_routes_unchanged() {
+        // With no route override, a model with one deployment behaves exactly as
+        // the direct-dispatch path: served_by = its provider, no fallback.
+        let usage = TokenUsage {
+            input_tokens: 1000,
+            output_tokens: 500,
+            ..Default::default()
+        };
+        let provider = Arc::new(MockProvider::new(usage));
+        let state = state_with(provider.clone(), Some(Usd::from_dollars_f64(1.0)));
+        let k = key(
+            Some(Usd::from_dollars_f64(1.0)),
+            None,
+            RateLimits::default(),
+        );
+        let done = Gateway::run(&state, &k, &chat_req()).await.unwrap();
+        assert_eq!(done.served_by, "openai/gpt-4o");
+        assert!(!done.fallback_fired);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(done.cost, Usd::from_micros(7_500));
     }
 }

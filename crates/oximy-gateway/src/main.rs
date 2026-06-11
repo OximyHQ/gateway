@@ -288,6 +288,27 @@ async fn run_up_async(args: UpArgs) -> anyhow::Result<()> {
         state.ledger.set_budget(&key.id, key.max_budget, Usd::ZERO);
     }
 
+    // ── 6b. Optional route overrides from OXIMY_ROUTES (JSON: model → Route) ───
+    // e.g. {"gpt-4o":{"targets":[{"provider_id":"openai","model":"gpt-4o"},
+    //       {"provider_id":"openrouter","model":"openai/gpt-4o"}],"strategy":"failover"}}
+    // Absent/empty env → every model keeps its single-target default.
+    if let Ok(raw) = std::env::var("OXIMY_ROUTES")
+        && !raw.trim().is_empty()
+    {
+        match serde_json::from_str::<std::collections::HashMap<String, gateway_route::Route>>(&raw)
+        {
+            Ok(routes) => {
+                for (model, route) in routes {
+                    tracing::info!(model = %model, targets = route.targets.len(), "route override installed");
+                    state.set_route(model, route);
+                }
+            }
+            Err(e) => {
+                eprintln!("  Warning: OXIMY_ROUTES is not valid JSON ({e}); ignoring.");
+            }
+        }
+    }
+
     // ── 6. Build the app router: API + dashboard (mounted last) ───────────────
     let api = gateway_control::router(state);
     let app = api.merge(gateway_dash::dash_router());

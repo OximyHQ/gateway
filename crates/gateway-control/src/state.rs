@@ -5,9 +5,11 @@
 //! request and safe to share across the Tokio pool. P1.6 swaps the in-memory
 //! stores for persistent ones behind the same field types (trait objects).
 
+use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use gateway_guard::GuardChain;
+use gateway_route::Route;
 use gateway_spine::{
     AuditSink, BudgetLedger, Clock, MemoryAudit, ModelRegistry, RateLimiter, SystemClock,
 };
@@ -32,6 +34,11 @@ pub struct AppState<C: Clock = SystemClock> {
     /// The content-guard chain run at `PreRequest` (over the prompt) and
     /// `PostResponse` (over the completion). Blocks secrets, masks PII by default.
     pub guard: Arc<GuardChain>,
+    /// Optional per-model route overrides: model id → ordered targets + strategy.
+    /// A model with NO entry routes as a single target to its registry provider
+    /// (behaviour unchanged from the pre-routing path). Populated by config; see
+    /// [`AppState::set_route`].
+    pub routes: RwLock<HashMap<String, Route>>,
     pub audit: Arc<dyn AuditSink>,
     pub clock: Arc<C>,
     /// Non-blocking telemetry sink — `try_send` only, never blocks a request.
@@ -95,11 +102,18 @@ impl<C: Clock> AppState<C> {
             keys,
             providers,
             guard,
+            routes: RwLock::new(HashMap::new()),
             audit,
             clock,
             telemetry,
             metrics,
         }
+    }
+
+    /// Install (or replace) the route for a model id. A configured route lets a
+    /// model fail over / load-balance across multiple (provider, model) targets.
+    pub fn set_route(&self, model: impl Into<String>, route: Route) {
+        self.routes.write().unwrap().insert(model.into(), route);
     }
 }
 

@@ -962,6 +962,7 @@ dependencies = [
  "gateway-config",
  "gateway-guard",
  "gateway-llm",
+ "gateway-route",
  "gateway-spine",
  "gateway-telemetry",
  "http",
