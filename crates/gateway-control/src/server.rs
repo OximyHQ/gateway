@@ -16,10 +16,12 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use futures::StreamExt;
+use gateway_cache::CacheControl;
 use gateway_spine::{Clock, SystemClock};
 use gateway_telemetry::{CacheStatus, CaptureMode, RequestKind, RequestLogRow};
 
 use crate::auth::authenticate;
+use crate::cache_handle::{StoreArgs, parse_cache_control};
 use crate::error::GatewayError;
 use crate::gateway::Gateway;
 use crate::sse_out::{delta_to_sse, done_event};
@@ -126,6 +128,7 @@ async fn chat_completions<C: Clock + 'static>(
     let req = body.to_unified();
 
     if req.stream {
+        // Streaming: no cache (noted: streaming cache replay is deferred to P2).
         match Gateway::run_stream(state.clone(), &key, &req).await {
             Ok(completed) => {
                 let model = req.model.clone();
@@ -194,6 +197,7 @@ async fn chat_completions<C: Clock + 'static>(
                     .header(header::CONTENT_TYPE, "text/event-stream")
                     .header("x-overhead-duration-ms", overhead.to_string())
                     .header("x-idempotency-key", completed.idempotency_key)
+                    .header("x-cache", "BYPASS") // streaming is not cached
                     .body(Body::from_stream(sse))
                     .unwrap();
                 resp.headers_mut().insert(
@@ -205,12 +209,49 @@ async fn chat_completions<C: Clock + 'static>(
             Err(e) => e.into_response(),
         }
     } else {
-        match Gateway::run(&state, &key, &req).await {
-            Ok(completed) => {
-                let overhead = started.elapsed().as_millis() as u64;
-                let latency_ms = overhead as i64;
+        // Non-streaming: check L1 cache before calling the provider.
 
-                // Log the row off the hot path — non-blocking try_send.
+        // Parse cache-control directives from the `x-oximy-cache` header.
+        let cache_ctl = parse_cache_control(&headers);
+
+        // Reconstruct the body as a JSON value for cache-key hashing. Use a
+        // deterministic subset (model + messages + temperature + max_tokens).
+        let body_value = serde_json::json!({
+            "model": body.model,
+            "messages": body.messages.iter().map(|m| serde_json::json!({"role": m.role, "content": m.content})).collect::<Vec<_>>(),
+            "temperature": body.temperature,
+            "max_tokens": body.max_tokens,
+        });
+
+        // Cache lookup (bypass if no cache installed or skip directive set).
+        if let Some(cache) = &state.cache {
+            let outcome = cache
+                .lookup(
+                    "default",
+                    "/v1/chat/completions",
+                    &req.model,
+                    &body_value,
+                    &cache_ctl,
+                )
+                .await;
+            // Collapse: HIT AND entry present → serve from cache.
+            if outcome.status == gateway_cache::CacheStatus::Hit
+                && let Some(entry) = outcome.value
+            {
+                // HIT: reconstruct the response from cache, charge $0.
+                let age_ms = outcome.age_ms.unwrap_or(0);
+                let overhead = started.elapsed().as_millis() as u64;
+                let cached_resp = match entry.body {
+                    gateway_cache::CachedBody::Unary(r) => r,
+                    gateway_cache::CachedBody::Stream(_) => {
+                        // Stream body in cache is not served as unary — treat as MISS.
+                        return run_unary_miss(
+                            state, &key, &req, body_value, cache_ctl, started, headers,
+                        )
+                        .await;
+                    }
+                };
+                // Log telemetry with $0 cost (cache hit = no provider call).
                 state.telemetry.log(RequestLogRow {
                     ts_ms: state.clock.now_ms(),
                     kind: RequestKind::Llm,
@@ -219,45 +260,129 @@ async fn chat_completions<C: Clock + 'static>(
                     user_id: None,
                     tags: vec![],
                     model: req.model.clone(),
-                    provider: String::new(),
-                    usage: completed.response.usage,
-                    cost: completed.cost,
-                    latency_ms,
+                    provider: "cache".into(),
+                    usage: entry.usage,
+                    cost: gateway_spine::Usd::ZERO,
+                    latency_ms: overhead as i64,
                     ttft_ms: None,
                     status: 200,
-                    served_by: completed.served_by.clone(),
-                    fallback_fired: completed.fallback_fired,
-                    cache_status: CacheStatus::Miss,
+                    served_by: "cache".into(),
+                    fallback_fired: false,
+                    cache_status: CacheStatus::Hit,
                     capture_mode: CaptureMode::Metadata,
                     request_text: None,
                     response_text: None,
                 });
-
-                let wire = WireChatResponse::from_unified(&completed.response, completed.cost);
+                let wire = WireChatResponse::from_unified(&cached_resp, gateway_spine::Usd::ZERO);
                 let mut resp = Json(wire).into_response();
-                resp.headers_mut().insert(
+                let h = resp.headers_mut();
+                h.insert(
                     "x-overhead-duration-ms",
                     header::HeaderValue::from_str(&overhead.to_string()).unwrap(),
                 );
-                resp.headers_mut().insert(
+                h.insert("x-cache", header::HeaderValue::from_static("HIT"));
+                h.insert(
+                    "x-cache-age-ms",
+                    header::HeaderValue::from_str(&age_ms.to_string()).unwrap(),
+                );
+                h.insert(
                     "x-idempotency-key",
-                    header::HeaderValue::from_str(&completed.idempotency_key).unwrap(),
+                    header::HeaderValue::from_static("cached"),
                 );
-                if let Ok(v) = header::HeaderValue::from_str(&completed.served_by) {
-                    resp.headers_mut().insert("x-served-by", v);
-                }
-                resp.headers_mut().insert(
+                h.insert("x-served-by", header::HeaderValue::from_static("cache"));
+                h.insert(
                     "x-fallback-fired",
-                    header::HeaderValue::from_static(if completed.fallback_fired {
-                        "true"
-                    } else {
-                        "false"
-                    }),
+                    header::HeaderValue::from_static("false"),
                 );
-                resp
+                return resp;
             }
-            Err(e) => e.into_response(),
         }
+
+        run_unary_miss(state, &key, &req, body_value, cache_ctl, started, headers).await
+    }
+}
+
+/// Execute a non-streaming call that was a cache MISS (or has no cache).
+/// On success, store the response in the cache before returning.
+async fn run_unary_miss<C: Clock + 'static>(
+    state: Arc<AppState<C>>,
+    key: &gateway_spine::VirtualKey,
+    req: &gateway_llm::ChatRequest,
+    body_value: serde_json::Value,
+    cache_ctl: CacheControl,
+    started: Instant,
+    _headers: HeaderMap,
+) -> Response {
+    match Gateway::run(&state, key, req).await {
+        Ok(completed) => {
+            let overhead = started.elapsed().as_millis() as u64;
+            let latency_ms = overhead as i64;
+
+            // Store in cache on success (non-streaming 200).
+            if let Some(cache) = &state.cache {
+                cache
+                    .store_unary(StoreArgs {
+                        tenant_id: "default",
+                        endpoint: "/v1/chat/completions",
+                        model: &req.model,
+                        body: &body_value,
+                        ctl: &cache_ctl,
+                        response: completed.response.clone(),
+                        usage: completed.response.usage,
+                        original_cost: completed.cost,
+                    })
+                    .await;
+            }
+
+            // Log the row off the hot path — non-blocking try_send.
+            state.telemetry.log(RequestLogRow {
+                ts_ms: state.clock.now_ms(),
+                kind: RequestKind::Llm,
+                key_id: key.id.clone(),
+                team_id: None,
+                user_id: None,
+                tags: vec![],
+                model: req.model.clone(),
+                provider: String::new(),
+                usage: completed.response.usage,
+                cost: completed.cost,
+                latency_ms,
+                ttft_ms: None,
+                status: 200,
+                served_by: completed.served_by.clone(),
+                fallback_fired: completed.fallback_fired,
+                cache_status: CacheStatus::Miss,
+                capture_mode: CaptureMode::Metadata,
+                request_text: None,
+                response_text: None,
+            });
+
+            let wire = WireChatResponse::from_unified(&completed.response, completed.cost);
+            let mut resp = Json(wire).into_response();
+            resp.headers_mut().insert(
+                "x-overhead-duration-ms",
+                header::HeaderValue::from_str(&overhead.to_string()).unwrap(),
+            );
+            resp.headers_mut().insert(
+                "x-idempotency-key",
+                header::HeaderValue::from_str(&completed.idempotency_key).unwrap(),
+            );
+            if let Ok(v) = header::HeaderValue::from_str(&completed.served_by) {
+                resp.headers_mut().insert("x-served-by", v);
+            }
+            resp.headers_mut().insert(
+                "x-fallback-fired",
+                header::HeaderValue::from_static(if completed.fallback_fired {
+                    "true"
+                } else {
+                    "false"
+                }),
+            );
+            resp.headers_mut()
+                .insert("x-cache", header::HeaderValue::from_static("MISS"));
+            resp
+        }
+        Err(e) => e.into_response(),
     }
 }
 
@@ -305,6 +430,7 @@ async fn models<C: Clock + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cache_handle::memory_cache_handle;
     use crate::guard::empty_chain;
     use crate::keystore::StaticKeyStore;
     use crate::providers::{Deployment, ProviderRegistry};
@@ -315,9 +441,11 @@ mod tests {
         ProviderCapabilities, ProviderError,
     };
     use gateway_spine::{
-        MemoryAudit, MockClock, ModelEntry, ModelPrice, RateLimits, TokenUsage, Usd, VirtualKey,
+        MemoryAudit, MockClock, ModelEntry, ModelPrice, RateLimits, SystemClock, TokenUsage, Usd,
+        VirtualKey,
     };
     use http::Request;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tower::ServiceExt;
 
     struct Echo;
@@ -376,6 +504,54 @@ mod tests {
         }
     }
 
+    /// A counting provider that records how many times it was called.
+    struct CountingProvider {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Provider for CountingProvider {
+        fn id(&self) -> &str {
+            "counting"
+        }
+        fn capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities {
+                supports_streaming: false,
+                supports_tools: false,
+                supports_vision: false,
+                supports_idempotency: true,
+            }
+        }
+        async fn chat(
+            &self,
+            req: &ChatRequest,
+            _creds: &Credentials,
+            _idempotency_key: &str,
+        ) -> Result<ChatResponse, ProviderError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(ChatResponse {
+                model: req.model.clone(),
+                content: vec![ContentPart::text("provider-response")],
+                tool_calls: vec![],
+                finish_reason: FinishReason::Stop,
+                usage: TokenUsage {
+                    input_tokens: 100,
+                    output_tokens: 50,
+                    ..Default::default()
+                },
+                provider_response_id: Some("resp_cached".into()),
+            })
+        }
+        async fn stream(
+            &self,
+            _req: &ChatRequest,
+            _creds: &Credentials,
+            _idempotency_key: &str,
+        ) -> Result<DeltaStream, ProviderError> {
+            unreachable!()
+        }
+    }
+
     fn gpt4o() -> ModelEntry {
         ModelEntry {
             id: "gpt-4o".into(),
@@ -427,6 +603,44 @@ mod tests {
             .ledger
             .set_budget("key_1", Some(Usd::from_dollars_f64(10.0)), Usd::ZERO);
         state
+    }
+
+    /// Build a state with a cache and a counting provider (SystemClock required for cache).
+    fn state_with_cache(calls: Arc<AtomicUsize>) -> Arc<AppState<SystemClock>> {
+        let mut ks = StaticKeyStore::new();
+        ks.insert(VirtualKey {
+            id: "key_1".into(),
+            token_hash: VirtualKey::hash_secret("sk-good"),
+            token_prefix: "sk-good".into(),
+            max_budget: Some(Usd::from_dollars_f64(100.0)),
+            limits: RateLimits::default(),
+            model_allowlist: None,
+            expires_at: None,
+            revoked: false,
+            parent_id: None,
+        });
+        let mut providers = ProviderRegistry::new();
+        providers.insert(
+            "openai",
+            Deployment {
+                provider: Arc::new(CountingProvider { calls }),
+                credentials: Arc::new(Credentials::new("sk-up")),
+            },
+        );
+        let mut state = AppState::with_parts(
+            Arc::new(ks),
+            Arc::new(SystemClock),
+            providers,
+            Arc::new(empty_chain()),
+            Arc::new(MemoryAudit::new()),
+        );
+        state.registry.write().unwrap().insert(gpt4o());
+        state
+            .ledger
+            .set_budget("key_1", Some(Usd::from_dollars_f64(100.0)), Usd::ZERO);
+        // Install the in-memory cache.
+        state.cache = Some(memory_cache_handle(SystemClock, 3600));
+        Arc::new(state)
     }
 
     #[tokio::test]
@@ -723,5 +937,133 @@ mod tests {
             prom_text.contains("gateway_requests_total"),
             "metrics counter not incremented: {prom_text}"
         );
+    }
+
+    // ── Cache integration tests ───────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn cache_miss_returns_x_cache_miss_header() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let state = state_with_cache(Arc::clone(&calls));
+        let app = router(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("authorization", "Bearer sk-good")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"model":"gpt-4o","messages":[{"role":"user","content":"cache-test"}]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.headers().get("x-cache").unwrap(), "MISS");
+        // Provider was called once.
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn cache_hit_skips_provider_and_returns_hit_header() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let state = state_with_cache(Arc::clone(&calls));
+
+        // First call: MISS — populates cache.
+        let resp1 = router(Arc::clone(&state))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("authorization", "Bearer sk-good")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"model":"gpt-4o","messages":[{"role":"user","content":"cache-hit-test"}]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp1.status(), StatusCode::OK);
+        assert_eq!(resp1.headers().get("x-cache").unwrap(), "MISS");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        // Second call: HIT — provider NOT called, x-cache: HIT.
+        let resp2 = router(Arc::clone(&state))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("authorization", "Bearer sk-good")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"model":"gpt-4o","messages":[{"role":"user","content":"cache-hit-test"}]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp2.status(), StatusCode::OK);
+        assert_eq!(resp2.headers().get("x-cache").unwrap(), "HIT");
+        // Provider must NOT have been called again.
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "provider must NOT be called on cache HIT"
+        );
+        let bytes = to_bytes(resp2.into_body(), 1 << 20).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        // The cached response must be the provider's response.
+        assert_eq!(v["choices"][0]["message"]["content"], "provider-response");
+        // Cost must be $0 on a cache HIT.
+        assert_eq!(v["usage"]["cost"], 0.0);
+    }
+
+    #[tokio::test]
+    async fn cache_no_store_directive_skips_write() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let state = state_with_cache(Arc::clone(&calls));
+
+        // First call with no-store: MISS, response NOT stored.
+        let resp1 = router(Arc::clone(&state))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("authorization", "Bearer sk-good")
+                    .header("content-type", "application/json")
+                    .header("x-oximy-cache", "no-store")
+                    .body(Body::from(
+                        r#"{"model":"gpt-4o","messages":[{"role":"user","content":"no-store-test"}]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp1.status(), StatusCode::OK);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        // Second identical call: still MISS (nothing stored).
+        let resp2 = router(Arc::clone(&state))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("authorization", "Bearer sk-good")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"model":"gpt-4o","messages":[{"role":"user","content":"no-store-test"}]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp2.status(), StatusCode::OK);
+        assert_eq!(resp2.headers().get("x-cache").unwrap(), "MISS");
+        // Provider called twice (nothing was cached).
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 }
