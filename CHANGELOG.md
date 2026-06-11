@@ -30,5 +30,21 @@ All notable changes to Oximy Gateway are documented here. The format follows
 - **`gateway-config`** (P1.6, config half): schema-validated config model with
   JSON Schema, env-var interpolation, validate/dry-run, AEAD-encrypted secrets,
   and a decK-style diff/apply engine.
+- **`gateway-control`** (P1.4): the Axum HTTP server — `/v1/chat/completions`
+  (+SSE streaming), `/v1/responses`, `/v1/messages`, `/v1/embeddings`, `/v1/models`,
+  authenticated `/metrics`. Full request lifecycle (auth → allowlist → rate-limit →
+  budget reserve → guard → provider egress → commit actual cost → telemetry) with
+  `SpineError`/`ProviderError` → HTTP mapping (incl. upstream-4xx passthrough) and
+  auth-before-body (unauthenticated → 401 regardless of content-type).
+- **`oximy-gateway up`** (P1.8a): zero-config first boot (auto-generate + print a
+  default admin key once), provider registration from env (OpenAI, Anthropic,
+  Gemini, **OpenRouter** + `OPENAI_BASE_URL` override), TCP serve, `/health`, and an
+  embedded HTML status page. One command boots a live gateway.
+- Telemetry wired into the lifecycle: every request logged off the hot path +
+  recorded into authenticated Prometheus metrics (`gateway_requests_total`,
+  `gateway_cost_micros_total`).
 - 8 milestone implementation plans under `docs/plans/` (~18k lines, TDD).
-- 221 tests passing across the workspace; clippy `-D warnings` and fmt clean.
+- **284 tests** passing across the workspace; clippy `-D warnings` and fmt clean.
+- **Verified end-to-end against real LLMs** via OpenRouter (gpt-4o-mini,
+  claude-3.5-haiku, deepseek-chat, llama-3.3-70b): real completions + streaming,
+  exact integer-µUSD cost tracking, and auth/budget/model governance enforced.
