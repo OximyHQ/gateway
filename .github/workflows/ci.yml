@@ -39,27 +39,21 @@ jobs:
         run: cargo test --all-features --workspace
 
   build-matrix:
-    name: build (${{ matrix.target }})
+    name: build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { os: ubuntu-latest,  target: x86_64-unknown-linux-gnu }
-          - { os: ubuntu-latest,  target: aarch64-unknown-linux-gnu }
-          - { os: macos-latest,   target: aarch64-apple-darwin }
-          - { os: macos-latest,   target: x86_64-apple-darwin }
-          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
+      # Build the NATIVE target on each runner — always has std. The full
+      # cross-platform matrix (5 targets) is produced by the release workflow
+      # via cargo-dist; CI just verifies the binary builds on each OS.
       - name: Build release binary
-        run: cargo build --release --bin oximy-gateway --target ${{ matrix.target }}
-        # Note: cross-targets (e.g. aarch64 linux) may need `cross`; wired in P5 release eng.
-        continue-on-error: ${{ matrix.target == 'aarch64-unknown-linux-gnu' }}
+        run: cargo build --release --bin oximy-gateway
 
   deny:
     name: cargo-deny (licenses · advisories)
