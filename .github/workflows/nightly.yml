@@ -1,0 +1,65 @@
+name: Nightly
+
+on:
+  schedule:
+    # 07:00 UTC daily
+    - cron: "0 7 * * *"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  provider-conformance:
+    name: live provider conformance
+    runs-on: ubuntu-latest
+    # Gated on secrets so forks don't fail; the real keys live in repo secrets.
+    if: ${{ github.repository == 'oximyhq/gateway' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run provider conformance suite (live)
+        # Placeholder until P1 lands the suite. Exercises real OpenAI/Anthropic/
+        # Gemini endpoints (stream + tool-calls) against golden fixtures.
+        run: cargo test --workspace --features conformance-live -- --include-ignored
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        continue-on-error: true  # scaffold: suite not yet present
+
+  mcp-conformance:
+    name: MCP spec conformance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run MCP conformance suite (SEP-2484)
+        run: cargo test --workspace --features conformance-mcp
+        continue-on-error: true  # scaffold: suite not yet present
+
+  soak-benchmark:
+    name: fully-loaded soak benchmark
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build release
+        run: cargo build --release --bin oximy-gateway
+      - name: Run benchmark harness (policies ON, multi-hour soak)
+        # Publishes overhead p50/p99, streaming TTFT, MCP-path overhead. The
+        # honest fully-loaded numbers nobody else publishes (see design §9).
+        run: echo "benchmark harness lands in P4; placeholder so the job graph exists"
+
+  audit:
+    name: security advisories
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}

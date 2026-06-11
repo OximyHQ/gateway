@@ -1,0 +1,28 @@
+# Rust
+/target
+**/*.rs.bk
+*.pdb
+
+# Local state / data
+*.sqlite
+*.sqlite-*
+*.db
+/data
+/.oximy-gateway
+
+# Secrets / env
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Dashboard build artifacts (SPA → embedded assets)
+crates/gateway-dash/web/node_modules
+crates/gateway-dash/web/dist

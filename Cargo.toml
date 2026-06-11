@@ -1,0 +1,41 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.92"
+license = "Apache-2.0"
+repository = "https://github.com/oximyhq/gateway"
+homepage = "https://github.com/oximyhq/gateway"
+authors = ["Oximy <oss@oximy.com>"]
+
+[workspace.dependencies]
+# Internal crates (path deps; versions tracked together pre-1.0)
+gateway-spine = { path = "crates/gateway-spine" }
+gateway-llm = { path = "crates/gateway-llm" }
+gateway-mcp = { path = "crates/gateway-mcp" }
+gateway-route = { path = "crates/gateway-route" }
+gateway-cache = { path = "crates/gateway-cache" }
+gateway-telemetry = { path = "crates/gateway-telemetry" }
+gateway-guard = { path = "crates/gateway-guard" }
+gateway-config = { path = "crates/gateway-config" }
+gateway-control = { path = "crates/gateway-control" }
+gateway-dash = { path = "crates/gateway-dash" }
+
+# Shared third-party deps (pinned once, inherited via `workspace = true`)
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = true

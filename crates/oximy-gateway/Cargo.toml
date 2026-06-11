@@ -1,0 +1,33 @@
+[package]
+name = "oximy-gateway"
+description = "Oximy Gateway — the unified, fastest, open-source LLM + MCP gateway. Single binary, embedded dashboard, agent-first control plane."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+default-run = "oximy-gateway"
+
+[[bin]]
+name = "oximy-gateway"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+gateway-spine = { workspace = true }
+gateway-llm = { workspace = true }
+gateway-mcp = { workspace = true }
+gateway-route = { workspace = true }
+gateway-cache = { workspace = true }
+gateway-telemetry = { workspace = true }
+gateway-guard = { workspace = true }
+gateway-config = { workspace = true }
+gateway-control = { workspace = true }
+gateway-dash = { workspace = true }

@@ -1,0 +1,19 @@
+[package]
+name = "gateway-control"
+description = "Control plane: admin REST API, admin-MCP server, AXI-grade CLI surface"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+gateway-spine = { workspace = true }
+gateway-config = { workspace = true }
+gateway-telemetry = { workspace = true }

@@ -1,0 +1,16 @@
+[package]
+name = "gateway-cache"
+description = "Response caching: exact-match, semantic, and provider prompt-cache passthrough"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+gateway-spine = { workspace = true }
