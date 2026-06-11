@@ -20,6 +20,9 @@ env:
   # cargo-dist will read this to know what version to install itself
   CARGO_DIST_VERSION: "0.28.0"
 
+permissions:
+  contents: read
+
 jobs:
   # ── Plan: cargo-dist works out what to build ───────────────────────────────
   plan:
