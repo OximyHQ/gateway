@@ -993,10 +993,14 @@ dependencies = [
 name = "gateway-guard"
 version = "0.0.0"
 dependencies = [
+ "async-trait",
  "gateway-spine",
+ "jsonschema",
+ "regex",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "tokio",
  "tracing",
 ]
 
@@ -1022,9 +1026,13 @@ dependencies = [
 name = "gateway-mcp"
 version = "0.0.0"
 dependencies = [
+ "async-trait",
  "gateway-spine",
+ "hex",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
