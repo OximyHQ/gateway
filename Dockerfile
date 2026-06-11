@@ -34,6 +34,7 @@ COPY crates/gateway-llm/Cargo.toml       crates/gateway-llm/Cargo.toml
 COPY crates/gateway-mcp/Cargo.toml       crates/gateway-mcp/Cargo.toml
 COPY crates/gateway-route/Cargo.toml     crates/gateway-route/Cargo.toml
 COPY crates/gateway-spine/Cargo.toml     crates/gateway-spine/Cargo.toml
+COPY crates/gateway-store/Cargo.toml     crates/gateway-store/Cargo.toml
 COPY crates/gateway-telemetry/Cargo.toml crates/gateway-telemetry/Cargo.toml
 COPY crates/oximy-gateway/Cargo.toml     crates/oximy-gateway/Cargo.toml
 

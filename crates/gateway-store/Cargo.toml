@@ -1,7 +1,12 @@
 [package]
 name = "gateway-store"
+description = "Durable persistence: SQLite/Postgres spend ledger (atomic reserve/commit), key store, crash-recovery sweep"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
 
 [dependencies]
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "postgres", "macros", "migrate"] }
