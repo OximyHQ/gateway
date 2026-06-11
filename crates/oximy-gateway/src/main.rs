@@ -18,7 +18,11 @@ use std::sync::Arc;
 
 use clap::Parser;
 
-use cli::{Cli, Command, UpArgs};
+use cli::{Cli, Command, KeysCommand, UpArgs};
+
+/// Bundled model catalog (models.dev-shaped JSON, ~65 models).
+/// Embedded at compile time — no disk dependency for the base catalog.
+const BUNDLED_CATALOG: &str = include_str!("models.json");
 
 fn main() -> ExitCode {
     tracing_subscriber::fmt()
@@ -37,7 +41,14 @@ fn main() -> ExitCode {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("oximy-gateway up failed: {e:#}");
-                ExitCode::from(70) // Semantic: runtime failure (not a usage error).
+                ExitCode::from(70)
+            }
+        },
+        Command::Keys(args) => match run_keys(args) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("oximy-gateway keys failed: {e:#}");
+                ExitCode::from(70)
             }
         },
     }
@@ -50,12 +61,15 @@ fn run_up(args: UpArgs) -> anyhow::Result<()> {
 }
 
 async fn run_up_async(args: UpArgs) -> anyhow::Result<()> {
+    use gateway_cache::build_registry;
+    use gateway_control::cache_handle::memory_cache_handle;
     use gateway_control::guard::default_chain;
     use gateway_control::keystore::StaticKeyStore;
     use gateway_control::providers::{Deployment, ProviderRegistry};
     use gateway_control::state::AppState;
     use gateway_llm::Credentials;
-    use gateway_spine::{MemoryAudit, ModelEntry, ModelPrice, SystemClock, Usd};
+    use gateway_llm::transports::openai::OpenAi;
+    use gateway_spine::{MemoryAudit, SystemClock, Usd};
 
     // ── 1. Resolve + create the state directory ───────────────────────────────
     let data_dir = cli::resolve_data_dir(args.dir.as_deref())?;
@@ -80,7 +94,11 @@ async fn run_up_async(args: UpArgs) -> anyhow::Result<()> {
         );
     }
 
-    // ── 3. Build the in-memory key store ─────────────────────────────────────
+    // ── 2b. Config file (light) ───────────────────────────────────────────────
+    let config_path = data_dir.join("oximy-gateway.json");
+    let config = load_or_seed_config(&config_path)?;
+
+    // ── 3. Build the in-memory key store ──────────────────────────────────────
     let mut ks = StaticKeyStore::new();
     for key in sf.load_keys() {
         ks.insert(key);
@@ -89,12 +107,11 @@ async fn run_up_async(args: UpArgs) -> anyhow::Result<()> {
     // ── 4. Register LLM providers from env vars ───────────────────────────────
     let mut providers = ProviderRegistry::new();
 
+    // OpenAI native
     if let Ok(api_key) = std::env::var("OPENAI_API_KEY")
         && !api_key.is_empty()
     {
-        use gateway_llm::transports::openai::OpenAi;
         let mut creds = Credentials::new(api_key);
-        // Optional base-URL override (Azure / self-hosted / OpenAI-compatible proxy).
         if let Ok(base) = std::env::var("OPENAI_BASE_URL")
             && !base.is_empty()
         {
@@ -110,11 +127,10 @@ async fn run_up_async(args: UpArgs) -> anyhow::Result<()> {
         tracing::info!("provider registered: openai");
     }
 
-    // OpenRouter is OpenAI-compatible: reuse the OpenAI transport with its base URL.
+    // OpenRouter (OpenAI-compatible)
     if let Ok(api_key) = std::env::var("OPENROUTER_API_KEY")
         && !api_key.is_empty()
     {
-        use gateway_llm::transports::openai::OpenAi;
         providers.insert(
             "openrouter",
             Deployment {
@@ -127,6 +143,7 @@ async fn run_up_async(args: UpArgs) -> anyhow::Result<()> {
         tracing::info!("provider registered: openrouter (OpenAI-compatible)");
     }
 
+    // Anthropic native
     if let Ok(api_key) = std::env::var("ANTHROPIC_API_KEY")
         && !api_key.is_empty()
     {
@@ -141,6 +158,7 @@ async fn run_up_async(args: UpArgs) -> anyhow::Result<()> {
         tracing::info!("provider registered: anthropic");
     }
 
+    // Gemini native
     if let Ok(api_key) = std::env::var("GEMINI_API_KEY")
         && !api_key.is_empty()
     {
@@ -155,20 +173,63 @@ async fn run_up_async(args: UpArgs) -> anyhow::Result<()> {
         tracing::info!("provider registered: gemini");
     }
 
-    if providers.get("openai").is_none()
-        && providers.get("anthropic").is_none()
-        && providers.get("gemini").is_none()
-        && providers.get("openrouter").is_none()
-    {
+    // ── 4b. OpenAI-compatible provider presets ────────────────────────────────
+    register_compat_provider(
+        &mut providers,
+        "GROQ_API_KEY",
+        "groq",
+        "https://api.groq.com/openai",
+    );
+    register_compat_provider(
+        &mut providers,
+        "TOGETHER_API_KEY",
+        "together",
+        "https://api.together.xyz",
+    );
+    register_compat_provider(
+        &mut providers,
+        "FIREWORKS_API_KEY",
+        "fireworks",
+        "https://api.fireworks.ai/inference",
+    );
+    register_compat_provider(
+        &mut providers,
+        "DEEPSEEK_API_KEY",
+        "deepseek",
+        "https://api.deepseek.com",
+    );
+    register_compat_provider(&mut providers, "XAI_API_KEY", "xai", "https://api.x.ai");
+    register_compat_provider(
+        &mut providers,
+        "MISTRAL_API_KEY",
+        "mistral",
+        "https://api.mistral.ai",
+    );
+    register_compat_provider(
+        &mut providers,
+        "PERPLEXITY_API_KEY",
+        "perplexity",
+        "https://api.perplexity.ai",
+    );
+    register_compat_provider(
+        &mut providers,
+        "CEREBRAS_API_KEY",
+        "cerebras",
+        "https://api.cerebras.ai",
+    );
+
+    if providers.is_empty() {
         eprintln!(
-            "  Warning: no provider API keys found (OPENAI_API_KEY, ANTHROPIC_API_KEY,\n\
-             \x20          GEMINI_API_KEY, OPENROUTER_API_KEY). The server will start but\n\
-             \x20          chat requests will fail until at least one key is set."
+            "  Warning: no provider API keys found. The server will start but\n\
+             \x20          chat requests will fail until at least one key is set.\n\
+             \x20          Supported env vars: OPENAI_API_KEY, ANTHROPIC_API_KEY,\n\
+             \x20          GEMINI_API_KEY, OPENROUTER_API_KEY, GROQ_API_KEY,\n\
+             \x20          TOGETHER_API_KEY, FIREWORKS_API_KEY, DEEPSEEK_API_KEY,\n\
+             \x20          XAI_API_KEY, MISTRAL_API_KEY, PERPLEXITY_API_KEY, CEREBRAS_API_KEY."
         );
     }
 
     // ── 5. Spin up the telemetry writer ──────────────────────────────────────
-    // /metrics is authenticated by the same API bearer auth (design §2/§11).
     use gateway_telemetry::{
         DEFAULT_CHANNEL_CAPACITY, GatewayMetrics, MemorySpendStore, spawn as spawn_telemetry,
     };
@@ -180,8 +241,34 @@ async fn run_up_async(args: UpArgs) -> anyhow::Result<()> {
         DEFAULT_CHANNEL_CAPACITY,
     );
 
-    // ── 6. Build AppState with hardcoded model price entries ─────────────────
-    let state = Arc::new(AppState::with_parts_and_telemetry(
+    // ── 6. Build the model registry from the bundled catalog ─────────────────
+    // User-override file: <data_dir>/models.json (merged over the bundled catalog).
+    let user_overrides_path = data_dir.join("models.json");
+    let user_overrides_json: Option<String> = if user_overrides_path.exists() {
+        match std::fs::read_to_string(&user_overrides_path) {
+            Ok(s) => {
+                tracing::info!(path = %user_overrides_path.display(), "loading user model overrides");
+                Some(s)
+            }
+            Err(e) => {
+                tracing::warn!(path = %user_overrides_path.display(), err = %e, "failed to read user model overrides; using bundled catalog only");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let model_registry = build_registry(BUNDLED_CATALOG, user_overrides_json.as_deref())
+        .map_err(|e| anyhow::anyhow!("failed to build model registry: {e}"))?;
+
+    tracing::info!(
+        models = model_registry.len(),
+        "model registry loaded from bundled catalog"
+    );
+
+    // ── 6a. Build AppState (with L1 cache pre-wired) ─────────────────────────
+    let mut state_inner = AppState::with_parts_and_telemetry(
         Arc::new(ks),
         Arc::new(SystemClock),
         providers,
@@ -189,109 +276,26 @@ async fn run_up_async(args: UpArgs) -> anyhow::Result<()> {
         Arc::new(MemoryAudit::new()),
         telem_sink,
         metrics,
-    ));
+    );
 
     {
-        let mut reg = state.registry.write().unwrap();
-        // gpt-4o: $2.50/MTok input, $10/MTok output
-        reg.insert(ModelEntry {
-            id: "gpt-4o".into(),
-            provider: "openai".into(),
-            price: ModelPrice {
-                input_per_mtok: 2_500_000,
-                output_per_mtok: 10_000_000,
-                cache_read_per_mtok: 1_250_000,
-                cache_write_per_mtok: 0,
-            },
-            context_window: Some(128_000),
-            max_output_tokens: Some(16_384),
-            supports_tools: true,
-            supports_vision: true,
-            supports_streaming: true,
-        });
-        // gpt-4o-mini: $0.15/MTok input, $0.60/MTok output
-        reg.insert(ModelEntry {
-            id: "gpt-4o-mini".into(),
-            provider: "openai".into(),
-            price: ModelPrice {
-                input_per_mtok: 150_000,
-                output_per_mtok: 600_000,
-                cache_read_per_mtok: 75_000,
-                cache_write_per_mtok: 0,
-            },
-            context_window: Some(128_000),
-            max_output_tokens: Some(16_384),
-            supports_tools: true,
-            supports_vision: true,
-            supports_streaming: true,
-        });
-        // claude-3-5-sonnet-20241022: $3/MTok input, $15/MTok output
-        reg.insert(ModelEntry {
-            id: "claude-3-5-sonnet-20241022".into(),
-            provider: "anthropic".into(),
-            price: ModelPrice {
-                input_per_mtok: 3_000_000,
-                output_per_mtok: 15_000_000,
-                cache_read_per_mtok: 300_000,
-                cache_write_per_mtok: 3_750_000,
-            },
-            context_window: Some(200_000),
-            max_output_tokens: Some(8_192),
-            supports_tools: true,
-            supports_vision: true,
-            supports_streaming: true,
-        });
-        // gemini-1.5-pro: $1.25/MTok input, $5/MTok output
-        reg.insert(ModelEntry {
-            id: "gemini-1.5-pro".into(),
-            provider: "gemini".into(),
-            price: ModelPrice {
-                input_per_mtok: 1_250_000,
-                output_per_mtok: 5_000_000,
-                cache_read_per_mtok: 312_500,
-                cache_write_per_mtok: 0,
-            },
-            context_window: Some(2_000_000),
-            max_output_tokens: Some(8_192),
-            supports_tools: true,
-            supports_vision: true,
-            supports_streaming: true,
-        });
-        // OpenRouter (OpenAI-compatible) — current models reachable via one key.
-        for (id, input_per_mtok, output_per_mtok) in [
-            ("openai/gpt-4o-mini", 150_000_i64, 600_000_i64),
-            ("openai/gpt-4o", 2_500_000, 10_000_000),
-            ("anthropic/claude-3.5-haiku", 800_000, 4_000_000),
-            ("deepseek/deepseek-chat", 280_000, 880_000),
-            ("meta-llama/llama-3.3-70b-instruct", 120_000, 300_000),
-        ] {
-            reg.insert(ModelEntry {
-                id: id.into(),
-                provider: "openrouter".into(),
-                price: ModelPrice {
-                    input_per_mtok,
-                    output_per_mtok,
-                    cache_read_per_mtok: 0,
-                    cache_write_per_mtok: 0,
-                },
-                context_window: Some(128_000),
-                max_output_tokens: Some(8_192),
-                supports_tools: true,
-                supports_vision: false,
-                supports_streaming: true,
-            });
+        let mut reg = state_inner.registry.write().unwrap();
+        for entry in model_registry.all_entries() {
+            reg.insert(entry);
         }
     }
 
-    // Set unlimited budget for the admin key.
+    // ── 6b. Wire the L1 in-memory cache into AppState ────────────────────────
+    state_inner.cache = Some(memory_cache_handle(SystemClock, 3600));
+
+    let state = Arc::new(state_inner);
+
+    // Set budget for all keys.
     for key in sf.load_keys() {
         state.ledger.set_budget(&key.id, key.max_budget, Usd::ZERO);
     }
 
-    // ── 6b. Optional route overrides from OXIMY_ROUTES (JSON: model → Route) ───
-    // e.g. {"gpt-4o":{"targets":[{"provider_id":"openai","model":"gpt-4o"},
-    //       {"provider_id":"openrouter","model":"openai/gpt-4o"}],"strategy":"failover"}}
-    // Absent/empty env → every model keeps its single-target default.
+    // ── 6c. Route overrides from OXIMY_ROUTES (JSON: model → Route) ──────────
     if let Ok(raw) = std::env::var("OXIMY_ROUTES")
         && !raw.trim().is_empty()
     {
@@ -309,21 +313,23 @@ async fn run_up_async(args: UpArgs) -> anyhow::Result<()> {
         }
     }
 
-    // ── 6c. Optional upstream MCP servers from OXIMY_MCP_SERVERS ──────────────
-    // JSON array, e.g. [{"name":"docs","url":"https://mcp.example.com/mcp"},
-    //   {"name":"local","command":"my-mcp-server","args":["--flag"]}]
-    // Absent/empty → the /mcp endpoint works but lists zero tools.
+    // ── 6d. Route overrides from config file ─────────────────────────────────
+    if let Some(cfg) = &config {
+        apply_config(cfg, &state);
+    }
+
+    // ── 6e. Upstream MCP servers from OXIMY_MCP_SERVERS ──────────────────────
     if let Ok(raw) = std::env::var("OXIMY_MCP_SERVERS")
         && !raw.trim().is_empty()
     {
         register_mcp_servers(&state, &raw).await;
     }
 
-    // ── 6. Build the app router: API + dashboard (mounted last) ───────────────
+    // ── 7. Build the app router: API + dashboard (mounted last) ───────────────
     let api = gateway_control::router(state);
     let app = api.merge(gateway_dash::dash_router());
 
-    // ── 7. Bind + serve ───────────────────────────────────────────────────────
+    // ── 8. Bind + serve with graceful shutdown ────────────────────────────────
     let addr: std::net::SocketAddr = format!("{}:{}", args.host, args.port).parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let bound = listener.local_addr()?;
@@ -349,13 +355,176 @@ async fn run_up_async(args: UpArgs) -> anyhow::Result<()> {
         let _ = open::that(format!("{base}/"));
     }
 
-    axum::serve(listener, app).await?;
+    // Graceful shutdown on SIGINT / SIGTERM.
+    let shutdown = async {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{SignalKind, signal};
+            let mut sigint = signal(SignalKind::interrupt()).expect("SIGINT handler");
+            let mut sigterm = signal(SignalKind::terminate()).expect("SIGTERM handler");
+            tokio::select! {
+                _ = sigint.recv() => tracing::info!("SIGINT received — shutting down"),
+                _ = sigterm.recv() => tracing::info!("SIGTERM received — shutting down"),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            tokio::signal::ctrl_c().await.ok();
+            tracing::info!("Ctrl-C received — shutting down");
+        }
+    };
+
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown)
+        .await?;
+
+    tracing::info!("gateway stopped");
     Ok(())
 }
 
+/// Register an OpenAI-compatible provider when the given env key is set.
+fn register_compat_provider(
+    providers: &mut gateway_control::providers::ProviderRegistry,
+    env_key: &str,
+    provider_id: &'static str,
+    base_url: &'static str,
+) {
+    use gateway_control::providers::Deployment;
+    use gateway_llm::Credentials;
+    use gateway_llm::transports::openai::OpenAi;
+
+    if let Ok(api_key) = std::env::var(env_key)
+        && !api_key.is_empty()
+    {
+        providers.insert(
+            provider_id,
+            Deployment {
+                provider: Arc::new(OpenAi::new()),
+                credentials: Arc::new(Credentials::new(api_key).with_base_url(base_url)),
+            },
+        );
+        tracing::info!(
+            provider_id,
+            base_url,
+            "provider registered (OpenAI-compatible)"
+        );
+    }
+}
+
+/// Light config file: load `oximy-gateway.json` from the data dir. On first boot
+/// (no file exists) write a commented example. Config is additive — env still wins
+/// for provider keys; config can add routes/model overrides.
+fn load_or_seed_config(config_path: &std::path::Path) -> anyhow::Result<Option<FileConfig>> {
+    if config_path.exists() {
+        let text = std::fs::read_to_string(config_path)
+            .map_err(|e| anyhow::anyhow!("reading config {}: {e}", config_path.display()))?;
+        let cfg: FileConfig = serde_json::from_str(&text)
+            .map_err(|e| anyhow::anyhow!("parsing config {}: {e}", config_path.display()))?;
+        tracing::info!(path = %config_path.display(), "config file loaded");
+        Ok(Some(cfg))
+    } else {
+        // Write an example config so the operator knows what's possible.
+        let example = r#"{
+  "_comment": "Oximy Gateway config — edit and restart to apply. All fields are optional.",
+  "routes": {},
+  "model_overrides": []
+}
+"#;
+        if let Err(e) = std::fs::write(config_path, example) {
+            tracing::warn!(path = %config_path.display(), err = %e, "could not write example config");
+        } else {
+            tracing::info!(path = %config_path.display(), "wrote example config");
+        }
+        Ok(None)
+    }
+}
+
+/// Minimal config file schema — only what we act on here. Other fields (providers,
+/// keys) are ignored; they are managed by env vars / the `keys` CLI.
+#[derive(serde::Deserialize, Default)]
+struct FileConfig {
+    #[serde(default)]
+    routes: std::collections::HashMap<String, FileRoute>,
+    #[serde(default)]
+    model_overrides: Vec<serde_json::Value>,
+}
+
+#[derive(serde::Deserialize)]
+struct FileRoute {
+    targets: Vec<FileRouteTarget>,
+    #[serde(default = "default_strategy")]
+    strategy: String,
+}
+
+fn default_strategy() -> String {
+    "failover".into()
+}
+
+#[derive(serde::Deserialize)]
+struct FileRouteTarget {
+    provider_id: String,
+    model: String,
+}
+
+/// Apply config-file routes and model overrides to an already-built AppState.
+fn apply_config<C: gateway_spine::Clock + 'static>(
+    cfg: &FileConfig,
+    state: &gateway_control::state::AppState<C>,
+) {
+    use gateway_cache::build_registry;
+
+    for (model_id, file_route) in &cfg.routes {
+        // Skip comment keys (keys starting with "_")
+        if model_id.starts_with('_') {
+            continue;
+        }
+        let targets: Vec<gateway_route::RouteTarget> = file_route
+            .targets
+            .iter()
+            .map(|t| gateway_route::RouteTarget::new(&t.provider_id, &t.model))
+            .collect();
+        if targets.is_empty() {
+            continue;
+        }
+        let strategy = match file_route.strategy.as_str() {
+            "weighted" => gateway_route::Strategy::Weighted,
+            "latency_aware" | "latency-aware" => gateway_route::Strategy::LatencyAware,
+            _ => gateway_route::Strategy::Failover,
+        };
+        let route = gateway_route::Route::new(targets, strategy);
+        tracing::info!(model = %model_id, strategy = %file_route.strategy, "config route installed");
+        state.set_route(model_id.clone(), route);
+    }
+
+    if !cfg.model_overrides.is_empty() {
+        let overrides_json = match serde_json::to_string(&cfg.model_overrides) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(err = %e, "could not serialize config model_overrides; skipping");
+                return;
+            }
+        };
+        // Re-build from the bundled catalog + config overrides and merge into state registry.
+        match build_registry(BUNDLED_CATALOG, Some(&overrides_json)) {
+            Ok(reg) => {
+                let mut state_reg = state.registry.write().unwrap();
+                for entry in reg.all_entries() {
+                    state_reg.insert(entry);
+                }
+                tracing::info!(
+                    count = cfg.model_overrides.len(),
+                    "config model overrides applied"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(err = %e, "config model_overrides parse error; skipping");
+            }
+        }
+    }
+}
+
 /// Parse `OXIMY_MCP_SERVERS` (JSON array) and register + refresh each upstream
-/// MCP server on the federation. Failures are logged and skipped — a bad server
-/// must never stop the gateway from booting.
+/// MCP server on the federation.
 async fn register_mcp_servers<C: gateway_spine::Clock + 'static>(
     state: &gateway_control::state::AppState<C>,
     raw: &str,
@@ -365,9 +534,7 @@ async fn register_mcp_servers<C: gateway_spine::Clock + 'static>(
     #[derive(serde::Deserialize)]
     struct McpServerCfg {
         name: String,
-        /// HTTP streamable endpoint (mutually exclusive with `command`).
         url: Option<String>,
-        /// stdio child command (mutually exclusive with `url`).
         command: Option<String>,
         #[serde(default)]
         args: Vec<String>,
@@ -418,6 +585,118 @@ async fn register_mcp_servers<C: gateway_spine::Clock + 'static>(
             }
         }
     }
+}
+
+// ── `keys` subcommand implementation ─────────────────────────────────────────
+
+fn run_keys(args: cli::KeysArgs) -> anyhow::Result<()> {
+    tokio::runtime::Runtime::new()?.block_on(run_keys_async(args))
+}
+
+async fn run_keys_async(args: cli::KeysArgs) -> anyhow::Result<()> {
+    use gateway_spine::{Clock, RateLimits, SystemClock, Usd, VirtualKey};
+
+    let data_dir = cli::resolve_data_dir(args.dir.as_deref())?;
+    std::fs::create_dir_all(&data_dir)?;
+    let state_path = cli::state_path(&data_dir);
+    let sf = state_file::StateFile::load_or_create(&state_path)?;
+
+    match args.subcommand {
+        KeysCommand::Create {
+            name,
+            budget_usd,
+            models,
+        } => {
+            let clock = SystemClock;
+            let ts = clock.now_ms();
+
+            // Generate a secret.
+            let secret = firstboot::generate_secret();
+            let key_id = format!(
+                "key_{}",
+                name.as_deref()
+                    .map(|n| n.replace(' ', "_"))
+                    .unwrap_or_else(|| format!("user_{ts}"))
+            );
+            let token_prefix: String = secret.chars().take(12).collect();
+
+            let max_budget = budget_usd.map(Usd::from_dollars_f64);
+            let model_allowlist = models.map(|m| {
+                m.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<_>>()
+            });
+
+            let key = VirtualKey {
+                id: key_id.clone(),
+                token_hash: VirtualKey::hash_secret(&secret),
+                token_prefix: token_prefix.clone(),
+                max_budget,
+                limits: RateLimits::default(),
+                model_allowlist,
+                expires_at: None,
+                revoked: false,
+                parent_id: None,
+            };
+
+            crate::firstboot::KeyStore::insert_key(&sf, &key)?;
+            sf.save(&state_path)?;
+
+            println!("\n  Key created successfully!");
+            println!("  ID:     {key_id}");
+            println!("  Prefix: {token_prefix}");
+            if let Some(b) = budget_usd {
+                println!("  Budget: ${b:.2}");
+            } else {
+                println!("  Budget: unlimited");
+            }
+            println!(
+                "\n  Secret (shown ONCE — store it now):\n\n    {secret}\n\n  \
+                 Use as: Authorization: Bearer {secret}\n"
+            );
+        }
+
+        KeysCommand::List => {
+            let keys = sf.load_keys();
+            if keys.is_empty() {
+                println!("No keys found in {}", data_dir.display());
+                return Ok(());
+            }
+            println!(
+                "\n  {:<35} {:<14} {:<12} {:<10} MODELS",
+                "ID", "PREFIX", "BUDGET", "REVOKED"
+            );
+            println!("  {}", "-".repeat(85));
+            for k in keys {
+                let budget = match k.max_budget {
+                    Some(b) => format!("${:.4}", b.as_dollars_f64()),
+                    None => "unlimited".into(),
+                };
+                let models = match &k.model_allowlist {
+                    Some(list) => list.join(","),
+                    None => "all".into(),
+                };
+                println!(
+                    "  {:<35} {:<14} {:<12} {:<10} {}",
+                    k.id,
+                    k.token_prefix,
+                    budget,
+                    if k.revoked { "yes" } else { "no" },
+                    models
+                );
+            }
+            println!();
+        }
+
+        KeysCommand::Revoke { id } => {
+            sf.revoke_key(&id)?;
+            sf.save(&state_path)?;
+            println!("Key '{id}' revoked and persisted.");
+        }
+    }
+
+    Ok(())
 }
 
 /// Print the freshly minted admin secret exactly once.
