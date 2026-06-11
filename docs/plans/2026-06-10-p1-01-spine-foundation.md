@@ -1042,7 +1042,11 @@ fn never_overspends_under_concurrency() {
         }));
     }
 
-    let successes = handles.into_iter().filter(|h| h.join().unwrap()).count();
+    let successes = handles
+        .into_iter()
+        .map(|h| h.join().unwrap())
+        .filter(|&ok| ok)
+        .count();
 
     assert_eq!(successes, 10, "exactly 10 reservations of $0.10 fit in $1.00");
     assert_eq!(ledger.spent("k"), Usd::from_dollars_f64(1.0), "never overspends");
@@ -1491,6 +1495,7 @@ pub use error::{RateDimension, SpineError};
 pub use key::{RateLimits, VirtualKey};
 pub use money::Usd;
 pub use pricing::ModelPrice;
+pub use ratelimit::RateLimiter;
 pub use registry::{ModelEntry, ModelRegistry};
 pub use usage::TokenUsage;
 ```
