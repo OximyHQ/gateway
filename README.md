@@ -20,9 +20,18 @@ boots it. One bearer key authenticates it. One budget covers tokens *and* tools.
 oximy-gateway up
 ```
 
-> **Status: alpha.** The architecture is settled and the core is implemented (spine,
-> LLM plane, MCP gateway, virtual keys, guardrails, dashboard). Expect breaking
-> changes before 1.0. See the [phase roadmap](#status--roadmap) below.
+<div align="center">
+
+![Oximy Gateway dashboard](./docs/images/dash-overview.png)
+
+*The embedded dashboard — live spend, 5,484 models, virtual keys, guardrails. See the [**full Feature Guide →**](./docs/FEATURES.md)*
+
+</div>
+
+> **Status: alpha.** The architecture is settled and the core is implemented: spine,
+> LLM plane (5,484 models via models.dev), MCP gateway, virtual keys with
+> **durable USD budgets** (survive restarts), guardrails, and a full dashboard.
+> Expect breaking changes before 1.0. See the [phase roadmap](#status--roadmap) below.
 
 ---
 
