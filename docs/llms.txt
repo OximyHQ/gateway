@@ -1,0 +1,70 @@
+# Oximy Gateway
+
+> The unified, fastest, open-source LLM + MCP gateway. Single Rust binary,
+> embedded dashboard, agent-first control plane.
+
+Oximy Gateway routes LLM calls and MCP tool calls through one shared governance
+spine: one virtual key covers both, one audit log spans both, one guardrail policy
+applies to both.
+
+- Repo: https://github.com/OximyHQ/gateway
+- License: Apache-2.0
+- Status: alpha
+
+## Documentation
+
+- [README](README.md): Overview, quickstart, feature list, architecture diagram
+- [Quickstart](docs/guide/quickstart.md): Install, boot, first request, dashboard tour, mint a key
+- [Configuration](docs/guide/configuration.md): Env vars, oximy-gateway.json, hot reload, env interpolation
+- [Providers](docs/guide/providers.md): Supported providers, how to enable each, base-URL override, model registry
+- [Keys & Budgets](docs/guide/keys-budgets.md): Virtual keys, USD budgets, rate limits, model allowlists, keys CLI
+- [Guardrails](docs/guide/guardrails.md): PII/secrets detection, enforcement modes, pipeline stages
+- [MCP Gateway](docs/guide/mcp.md): POST /mcp, server federation, tool ACLs, connecting clients
+- [Observability](docs/guide/observability.md): Prometheus metrics, request log, cost headers, health check
+- [Deployment](docs/guide/deployment.md): Binary, Docker, reverse proxy, TLS, systemd, persistence
+
+## Key facts for agents
+
+- Binary: `oximy-gateway`
+- Boot command: `oximy-gateway up [--port 8080] [--host 127.0.0.1] [--dir PATH] [--no-open]`
+- First boot prints a one-time admin key (shown once; store it)
+- All `/v1/*`, `/metrics`, and `/mcp` endpoints require `Authorization: Bearer <key>`
+- `GET /health` is unauthenticated (liveness probe)
+- Provider keys set via env: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `OPENROUTER_API_KEY`, and more
+- `OPENAI_BASE_URL` overrides the OpenAI transport base URL (Ollama, vLLM, Azure, etc.)
+
+## Endpoints
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| POST | /v1/chat/completions | Bearer | OpenAI-compatible chat, supports streaming |
+| POST | /v1/responses | Bearer | OpenAI Responses API |
+| POST | /v1/messages | Bearer | Anthropic Messages API |
+| POST | /v1/embeddings | Bearer | Embeddings (returns 501 in alpha) |
+| GET | /v1/models | Bearer | Model registry with pricing |
+| GET | /metrics | Bearer | Prometheus / OpenMetrics |
+| GET | /health | None | Liveness probe |
+| POST | /mcp | Bearer | JSON-RPC 2.0 MCP gateway |
+| GET | / | None | Embedded dashboard |
+
+## Response metadata
+
+Every `/v1/*` response includes:
+- `usage.cost` (USD, exact) in the body
+- `x-overhead-duration-ms` header (gateway self-overhead)
+- `x-served-by` header (provider/model)
+- `x-fallback-fired` header (boolean)
+- `x-idempotency-key` header
+
+## Design document
+
+[docs/2026-06-10-oximy-gateway-design.md](docs/2026-06-10-oximy-gateway-design.md)
+Full architecture, module decomposition, spine invariants, phase roadmap.
+
+## Contributing
+
+[CONTRIBUTING.md](CONTRIBUTING.md): DCO sign-off required; TDD workflow; lint with
+`cargo clippy --all-targets -- -D warnings`; `#![forbid(unsafe_code)]` everywhere.
+
+[AGENTS.md](AGENTS.md): Spine invariants that must not be violated, CLI/AX
+conventions, PR checklist.
