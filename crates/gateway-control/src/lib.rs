@@ -28,7 +28,7 @@ pub use gateway::{Completed, CompletedStream, Gateway};
 pub use guard::{AllowAll, GuardHook, GuardVerdict};
 pub use keystore::{KeyStore, StaticKeyStore};
 pub use providers::{Deployment, ProviderRegistry};
-pub use server::router;
+pub use server::{router, serve};
 pub use sse_out::{delta_to_sse, done_event};
 pub use state::AppState;
 pub use wire::{WireChatRequest, WireChatResponse};

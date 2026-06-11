@@ -4,6 +4,7 @@
 //! router is built over `Arc<AppState<SystemClock>>` for production; tests build
 //! it over `Arc<AppState<MockClock>>` and drive it with `tower::ServiceExt`.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -15,7 +16,7 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use futures::StreamExt;
-use gateway_spine::Clock;
+use gateway_spine::{Clock, SystemClock};
 
 use crate::auth::authenticate;
 use crate::error::GatewayError;
@@ -24,15 +25,33 @@ use crate::sse_out::{delta_to_sse, done_event};
 use crate::state::AppState;
 use crate::wire::{WireChatRequest, WireChatResponse};
 
-/// Build the full `/v1/*` router over a shared state.
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Build the full API router over a shared state. Includes `/health` (unauthenticated
+/// liveness probe) and all `/v1/*` endpoints. The `/` dashboard is mounted by the
+/// binary via `gateway_dash::dash_router()` merged as the fallback layer.
 pub fn router<C: Clock + 'static>(state: Arc<AppState<C>>) -> Router {
     Router::new()
+        .route("/health", get(health))
         .route("/v1/chat/completions", post(chat_completions::<C>))
         .route("/v1/responses", post(chat_completions::<C>))
         .route("/v1/messages", post(chat_completions::<C>))
         .route("/v1/embeddings", post(embeddings::<C>))
         .route("/v1/models", get(models::<C>))
         .with_state(state)
+}
+
+/// Bind a `TcpListener` at `addr` and run the gateway server.
+/// Use this from `oximy-gateway up` to actually start serving.
+pub async fn serve(state: Arc<AppState<SystemClock>>, addr: SocketAddr) -> std::io::Result<()> {
+    let app = router(state);
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    axum::serve(listener, app).await
+}
+
+/// `GET /health` — unauthenticated liveness probe. Returns `{"status":"ok","version":"..."}`.
+async fn health() -> Response {
+    Json(serde_json::json!({ "status": "ok", "version": VERSION })).into_response()
 }
 
 fn bearer(headers: &HeaderMap) -> Option<&str> {
