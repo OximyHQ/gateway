@@ -1,0 +1,15 @@
+{
+  "id": "msg_01ABC",
+  "type": "message",
+  "model": "claude-3-5-sonnet-20241022",
+  "stop_reason": "end_turn",
+  "content": [
+    { "type": "text", "text": "Hi from Claude" }
+  ],
+  "usage": {
+    "input_tokens": 800,
+    "output_tokens": 500,
+    "cache_read_input_tokens": 200,
+    "cache_creation_input_tokens": 50
+  }
+}
