@@ -41,6 +41,10 @@ tokio-stream = "0.1"
 async-trait = "0.1"
 bytes = "1"
 wiremock = "0.6"
+axum = { version = "0.8", features = ["json", "tokio", "http2"] }
+tower = { version = "0.5", features = ["util"] }
+http = "1"
+uuid = { version = "1", features = ["v4"] }
 
 [profile.release]
 opt-level = 3

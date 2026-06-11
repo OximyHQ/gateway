@@ -15,5 +15,16 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }
 gateway-spine = { workspace = true }
+gateway-llm = { workspace = true }
 gateway-config = { workspace = true }
 gateway-telemetry = { workspace = true }
+axum = { workspace = true }
+http = { workspace = true }
+uuid = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+
+[dev-dependencies]
+tower = { workspace = true }
+http = { workspace = true }
+serde_json = { workspace = true }
