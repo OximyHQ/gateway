@@ -1,13 +1,34 @@
 //! # gateway-control
 //!
-//! Three thin clients over one API: admin REST, the 3-meta-tool admin-MCP server, and an agent-first CLI. Self-provisioning attenuated sub-keys, agent-queryable telemetry.
+//! The HTTP ingress + per-request governance lifecycle over the spine. Three
+//! thin clients (REST API, admin-MCP, CLI) share one core; P1.4 ships the REST
+//! data-plane (`/v1/*`) and the lifecycle that wires the spine (auth, budgets,
+//! rate limits, audit) to the `gateway-llm` egress (streaming, idempotency).
+//! Admin CRUD / admin-MCP / CLI land in P1.6 and P3.
 //!
-//! Part of [Oximy Gateway](https://github.com/oximyhq/gateway) — the unified,
-//! Apache-2.0 LLM + MCP gateway. See `docs/2026-06-10-oximy-gateway-design.md`.
-//!
-//! Status: **scaffold**. Implementation tracked by the Phase plans under `docs/plans/`.
+//! Part of [Oximy Gateway](https://github.com/oximyhq/gateway). See
+//! `docs/2026-06-10-oximy-gateway-design.md` (§2 invariants, §6 lifecycle).
 
 #![forbid(unsafe_code)]
 
-/// Placeholder so the crate compiles in the workspace before implementation lands.
-pub const CRATE: &str = "gateway-control";
+pub mod auth;
+pub mod error;
+pub mod gateway;
+pub mod guard;
+pub mod keystore;
+pub mod providers;
+pub mod server;
+pub mod sse_out;
+pub mod state;
+pub mod wire;
+
+pub use auth::{authenticate, parse_bearer};
+pub use error::GatewayError;
+pub use gateway::{Completed, CompletedStream, Gateway};
+pub use guard::{AllowAll, GuardHook, GuardVerdict};
+pub use keystore::{KeyStore, StaticKeyStore};
+pub use providers::{Deployment, ProviderRegistry};
+pub use server::router;
+pub use sse_out::{delta_to_sse, done_event};
+pub use state::AppState;
+pub use wire::{WireChatRequest, WireChatResponse};
