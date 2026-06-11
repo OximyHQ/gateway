@@ -5,7 +5,7 @@
 //! it over `Arc<AppState<MockClock>>` and drive it with `tower::ServiceExt`.
 
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use axum::Json;
@@ -17,6 +17,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use futures::StreamExt;
 use gateway_spine::{Clock, SystemClock};
+use gateway_telemetry::{CacheStatus, CaptureMode, RequestKind, RequestLogRow};
 
 use crate::auth::authenticate;
 use crate::error::GatewayError;
@@ -28,16 +29,23 @@ use crate::wire::{WireChatRequest, WireChatResponse};
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Build the full API router over a shared state. Includes `/health` (unauthenticated
-/// liveness probe) and all `/v1/*` endpoints. The `/` dashboard is mounted by the
-/// binary via `gateway_dash::dash_router()` merged as the fallback layer.
+/// liveness probe), `/metrics` (authenticated Prometheus, design §2/§11), and all
+/// `/v1/*` endpoints. Unknown `/v1/*` paths return 404 — NOT the SPA HTML — so the
+/// SPA catch-all in the binary only covers non-API paths. The `/` dashboard is
+/// mounted by the binary via `gateway_dash::dash_router()` merged as the fallback
+/// layer after this router.
 pub fn router<C: Clock + 'static>(state: Arc<AppState<C>>) -> Router {
     Router::new()
         .route("/health", get(health))
+        .route("/metrics", get(metrics_handler::<C>))
         .route("/v1/chat/completions", post(chat_completions::<C>))
         .route("/v1/responses", post(chat_completions::<C>))
         .route("/v1/messages", post(chat_completions::<C>))
         .route("/v1/embeddings", post(embeddings::<C>))
         .route("/v1/models", get(models::<C>))
+        // Explicit 404 for any other /v1/* path so the SPA fallback never
+        // intercepts an API miss and falsely returns 200 with HTML.
+        .route("/v1/{*rest}", get(v1_not_found).post(v1_not_found))
         .with_state(state)
 }
 
@@ -52,6 +60,39 @@ pub async fn serve(state: Arc<AppState<SystemClock>>, addr: SocketAddr) -> std::
 /// `GET /health` — unauthenticated liveness probe. Returns `{"status":"ok","version":"..."}`.
 async fn health() -> Response {
     Json(serde_json::json!({ "status": "ok", "version": VERSION })).into_response()
+}
+
+/// `GET /metrics` — authenticated Prometheus text exposition (design §2/§11).
+/// Uses the same bearer authentication as all other API endpoints (any valid
+/// virtual key), so `/metrics` is never accidentally open.
+async fn metrics_handler<C: Clock + 'static>(
+    State(state): State<Arc<AppState<C>>>,
+    headers: HeaderMap,
+) -> Response {
+    // Auth-by-default: same path as every other authenticated handler.
+    match authenticate(state.keys.as_ref(), state.clock.as_ref(), bearer(&headers)) {
+        Ok(_) => {}
+        Err(e) => return e.into_response(),
+    }
+    let text = state.metrics.render();
+    (
+        StatusCode::OK,
+        [(
+            header::CONTENT_TYPE,
+            gateway_telemetry::METRICS_CONTENT_TYPE,
+        )],
+        text,
+    )
+        .into_response()
+}
+
+/// Catch-all for unknown `/v1/*` paths — always 404 (never the SPA HTML).
+async fn v1_not_found() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(serde_json::json!({ "error": { "message": "not found", "type": "invalid_request_error" } })),
+    )
+        .into_response()
 }
 
 fn bearer(headers: &HeaderMap) -> Option<&str> {
@@ -88,20 +129,63 @@ async fn chat_completions<C: Clock + 'static>(
                 let model = req.model.clone();
                 let overhead = started.elapsed().as_millis() as u64;
                 let inner = completed.stream;
+
+                // Capture values needed for the telemetry row after the stream ends.
+                let telem_sink = state.telemetry.clone();
+                let telem_key_id = key.id.clone();
+                let telem_model = req.model.clone();
+                let telem_ts_ms = state.clock.now_ms();
+
                 // Map each unified delta to an SSE frame, then append [DONE].
+                // Track the last usage delta to build the telemetry row on completion.
+                // Use a shared slot so the map and chain closures can both reach it.
+                let last_usage: Arc<Mutex<Option<gateway_spine::TokenUsage>>> =
+                    Arc::new(Mutex::new(None));
+                let last_usage_writer = Arc::clone(&last_usage);
                 let sse = inner
                     .map(move |item| {
                         let frame = match item {
-                            Ok(delta) => delta_to_sse(&model, &delta, None),
-                            Err(e) => format!(
+                            Ok(ref delta) => {
+                                if let Some(u) = delta.usage {
+                                    *last_usage_writer.lock().unwrap() = Some(u);
+                                }
+                                delta_to_sse(&model, delta, None)
+                            }
+                            Err(ref e) => format!(
                                 "data: {}\n\n",
                                 serde_json::json!({"error": {"message": e.to_string()}})
                             ),
                         };
                         Ok::<_, std::convert::Infallible>(frame)
                     })
-                    .chain(futures::stream::once(async {
-                        Ok::<_, std::convert::Infallible>(done_event())
+                    .chain(futures::stream::once({
+                        async move {
+                            // Fire telemetry on stream completion (off hot path — try_send only).
+                            // usage may be None if the stream was empty/errored.
+                            let usage = last_usage.lock().unwrap().unwrap_or_default();
+                            telem_sink.log(RequestLogRow {
+                                ts_ms: telem_ts_ms,
+                                kind: RequestKind::Llm,
+                                key_id: telem_key_id,
+                                team_id: None,
+                                user_id: None,
+                                tags: vec![],
+                                model: telem_model,
+                                provider: String::new(),
+                                usage,
+                                cost: gateway_spine::Usd::ZERO,
+                                latency_ms: overhead as i64,
+                                ttft_ms: None,
+                                status: 200,
+                                served_by: String::new(),
+                                fallback_fired: false,
+                                cache_status: CacheStatus::Bypass,
+                                capture_mode: CaptureMode::Metadata,
+                                request_text: None,
+                                response_text: None,
+                            });
+                            Ok::<_, std::convert::Infallible>(done_event())
+                        }
                     }));
                 let mut resp = Response::builder()
                     .status(StatusCode::OK)
@@ -122,6 +206,31 @@ async fn chat_completions<C: Clock + 'static>(
         match Gateway::run(&state, &key, &req).await {
             Ok(completed) => {
                 let overhead = started.elapsed().as_millis() as u64;
+                let latency_ms = overhead as i64;
+
+                // Log the row off the hot path — non-blocking try_send.
+                state.telemetry.log(RequestLogRow {
+                    ts_ms: state.clock.now_ms(),
+                    kind: RequestKind::Llm,
+                    key_id: key.id.clone(),
+                    team_id: None,
+                    user_id: None,
+                    tags: vec![],
+                    model: req.model.clone(),
+                    provider: String::new(),
+                    usage: completed.response.usage,
+                    cost: completed.cost,
+                    latency_ms,
+                    ttft_ms: None,
+                    status: 200,
+                    served_by: String::new(),
+                    fallback_fired: false,
+                    cache_status: CacheStatus::Miss,
+                    capture_mode: CaptureMode::Metadata,
+                    request_text: None,
+                    response_text: None,
+                });
+
                 let wire = WireChatResponse::from_unified(&completed.response, completed.cost);
                 let mut resp = Json(wire).into_response();
                 resp.headers_mut().insert(
@@ -420,5 +529,186 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+    }
+
+    // ── New tests for P1.7 ────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn metrics_without_bearer_is_401() {
+        let app = router(test_state());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn metrics_with_bad_token_is_401() {
+        let app = router(test_state());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/metrics")
+                    .header("authorization", "Bearer sk-wrong")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn metrics_with_valid_bearer_returns_prometheus_text() {
+        let app = router(test_state());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/metrics")
+                    .header("authorization", "Bearer sk-good")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        // Content-Type must be the OpenMetrics MIME type (design §2/§11).
+        let ct = resp
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            ct.contains("application/openmetrics-text"),
+            "expected OpenMetrics content-type, got {ct:?}"
+        );
+        let bytes = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+        let text = String::from_utf8(bytes.to_vec()).unwrap();
+        // Body must contain at least one registered series name.
+        assert!(
+            text.contains("gateway_requests") || text.contains("gateway_dropped_rows"),
+            "expected Prometheus series in body, got: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_v1_path_is_404_not_spa_html() {
+        // Before the fix, the SPA catch-all intercepted /v1/* and returned 200
+        // with HTML.  After the fix, the explicit fallback returns 404 JSON.
+        let app = router(test_state());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/nonexistent")
+                    .header("authorization", "Bearer sk-good")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let bytes = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+        let text = String::from_utf8(bytes.to_vec()).unwrap();
+        // Must be JSON, not HTML.
+        assert!(
+            !text.contains("<!DOCTYPE"),
+            "expected JSON error, got HTML: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_chat_records_telemetry_row() {
+        use gateway_telemetry::spawn as spawn_telem;
+        use gateway_telemetry::{DEFAULT_CHANNEL_CAPACITY, GatewayMetrics, MemorySpendStore};
+
+        let metrics = Arc::new(GatewayMetrics::new());
+        let store = Arc::new(MemorySpendStore::new());
+        let (sink, _writer) = spawn_telem(
+            Arc::clone(&store),
+            Arc::clone(&metrics),
+            DEFAULT_CHANNEL_CAPACITY,
+        );
+
+        let mut ks = StaticKeyStore::new();
+        ks.insert(VirtualKey {
+            id: "key_1".into(),
+            token_hash: VirtualKey::hash_secret("sk-good"),
+            token_prefix: "sk-good".into(),
+            max_budget: Some(Usd::from_dollars_f64(10.0)),
+            limits: RateLimits::default(),
+            model_allowlist: None,
+            expires_at: None,
+            revoked: false,
+            parent_id: None,
+        });
+        let mut providers = ProviderRegistry::new();
+        providers.insert(
+            "openai",
+            Deployment {
+                provider: Arc::new(Echo),
+                credentials: Arc::new(Credentials::new("up")),
+            },
+        );
+        let state = Arc::new(AppState::with_parts_and_telemetry(
+            Arc::new(ks),
+            Arc::new(MockClock::new(0)),
+            providers,
+            Arc::new(AllowAll),
+            Arc::new(MemoryAudit::new()),
+            sink,
+            Arc::clone(&metrics),
+        ));
+        state.registry.write().unwrap().insert(gpt4o());
+        state
+            .ledger
+            .set_budget("key_1", Some(Usd::from_dollars_f64(10.0)), Usd::ZERO);
+
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("authorization", "Bearer sk-good")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        // Drain: give the async writer a few ticks to process the row.
+        // Call row_count via the trait (Arc<MemorySpendStore> needs explicit deref).
+        use gateway_telemetry::SpendStore;
+        for _ in 0..500 {
+            tokio::task::yield_now().await;
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            if SpendStore::row_count(store.as_ref()) >= 1 {
+                break;
+            }
+        }
+        // The store should have received at least one telemetry row.
+        assert!(
+            SpendStore::row_count(store.as_ref()) >= 1,
+            "telemetry row not recorded after chat"
+        );
+        // The Prometheus metrics text must reference the request counter.
+        let prom_text = metrics.render();
+        assert!(
+            prom_text.contains("gateway_requests_total"),
+            "metrics counter not incremented: {prom_text}"
+        );
     }
 }

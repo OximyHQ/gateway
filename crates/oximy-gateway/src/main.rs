@@ -167,13 +167,28 @@ async fn run_up_async(args: UpArgs) -> anyhow::Result<()> {
         );
     }
 
-    // ── 5. Build AppState with hardcoded model price entries ─────────────────
-    let state = Arc::new(AppState::with_parts(
+    // ── 5. Spin up the telemetry writer ──────────────────────────────────────
+    // /metrics is authenticated by the same API bearer auth (design §2/§11).
+    use gateway_telemetry::{
+        DEFAULT_CHANNEL_CAPACITY, GatewayMetrics, MemorySpendStore, spawn as spawn_telemetry,
+    };
+    let metrics = Arc::new(GatewayMetrics::new());
+    let spend_store = Arc::new(MemorySpendStore::new());
+    let (telem_sink, _telem_writer) = spawn_telemetry(
+        Arc::clone(&spend_store),
+        Arc::clone(&metrics),
+        DEFAULT_CHANNEL_CAPACITY,
+    );
+
+    // ── 6. Build AppState with hardcoded model price entries ─────────────────
+    let state = Arc::new(AppState::with_parts_and_telemetry(
         Arc::new(ks),
         Arc::new(SystemClock),
         providers,
         Arc::new(AllowAll),
         Arc::new(MemoryAudit::new()),
+        telem_sink,
+        metrics,
     ));
 
     {
