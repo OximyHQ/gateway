@@ -20,9 +20,9 @@ use clap::Parser;
 
 use cli::{Cli, Command, KeysCommand, UpArgs};
 
-/// Bundled model catalog (models.dev-shaped JSON, ~65 models).
+/// Bundled model catalog in models.dev API snapshot format (5000+ models, 142 providers).
 /// Embedded at compile time — no disk dependency for the base catalog.
-const BUNDLED_CATALOG: &str = include_str!("models.json");
+const BUNDLED_MODELS_DEV: &str = include_str!("models-dev.json");
 
 fn main() -> ExitCode {
     tracing_subscriber::fmt()
@@ -61,7 +61,7 @@ fn run_up(args: UpArgs) -> anyhow::Result<()> {
 }
 
 async fn run_up_async(args: UpArgs) -> anyhow::Result<()> {
-    use gateway_cache::build_registry;
+    use gateway_cache::build_registry_from_models_dev;
     use gateway_control::cache_handle::memory_cache_handle;
     use gateway_control::guard::default_chain;
     use gateway_control::keystore::{MutableKeyStore, PersistHook};
@@ -259,8 +259,9 @@ async fn run_up_async(args: UpArgs) -> anyhow::Result<()> {
         DEFAULT_CHANNEL_CAPACITY,
     );
 
-    // ── 6. Build the model registry from the bundled catalog ─────────────────
-    // User-override file: <data_dir>/models.json (merged over the bundled catalog).
+    // ── 6. Build the model registry from the bundled models.dev catalog ──────
+    // User-override file: <data_dir>/models.json (flat-array format, merged over
+    // the bundled catalog). Overrides win by id.
     let user_overrides_path = data_dir.join("models.json");
     let user_overrides_json: Option<String> = if user_overrides_path.exists() {
         match std::fs::read_to_string(&user_overrides_path) {
@@ -277,12 +278,13 @@ async fn run_up_async(args: UpArgs) -> anyhow::Result<()> {
         None
     };
 
-    let model_registry = build_registry(BUNDLED_CATALOG, user_overrides_json.as_deref())
-        .map_err(|e| anyhow::anyhow!("failed to build model registry: {e}"))?;
+    let model_registry =
+        build_registry_from_models_dev(BUNDLED_MODELS_DEV, user_overrides_json.as_deref())
+            .map_err(|e| anyhow::anyhow!("failed to build model registry: {e}"))?;
 
     tracing::info!(
         models = model_registry.len(),
-        "model registry loaded from bundled catalog"
+        "loaded models from models.dev catalog"
     );
 
     // ── 6a. Build AppState (with L1 cache pre-wired) ─────────────────────────
@@ -490,7 +492,7 @@ fn apply_config<C: gateway_spine::Clock + 'static>(
     cfg: &FileConfig,
     state: &gateway_control::state::AppState<C>,
 ) {
-    use gateway_cache::build_registry;
+    use gateway_cache::build_registry_from_models_dev;
 
     for (model_id, file_route) in &cfg.routes {
         // Skip comment keys (keys starting with "_")
@@ -524,7 +526,7 @@ fn apply_config<C: gateway_spine::Clock + 'static>(
             }
         };
         // Re-build from the bundled catalog + config overrides and merge into state registry.
-        match build_registry(BUNDLED_CATALOG, Some(&overrides_json)) {
+        match build_registry_from_models_dev(BUNDLED_MODELS_DEV, Some(&overrides_json)) {
             Ok(reg) => {
                 let mut state_reg = state.registry.write().unwrap();
                 for entry in reg.all_entries() {
