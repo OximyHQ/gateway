@@ -1,0 +1,39 @@
+# .dockerignore for oximy-gateway
+# Exclude anything that's not needed to build the binary.
+
+# Rust build artifacts (large — never include)
+target/
+
+# Git internals
+.git/
+.gitignore
+
+# Docs and research notes (can be large)
+docs/
+*.md
+!Cargo.toml
+!rust-toolchain.toml
+
+# CI/CD configuration (not needed at build time)
+.github/
+
+# Distribution + installer tooling
+dist-workspace.toml
+install.sh
+Makefile
+justfile
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+
+# Editor / IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Test fixtures / corpus files
+**/testdata/
+**/fixtures/

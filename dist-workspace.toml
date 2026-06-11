@@ -1,0 +1,51 @@
+# cargo-dist configuration for Oximy Gateway.
+# Run `cargo dist plan` to preview releases, `cargo dist build` to build locally.
+# Ref: https://opensource.axo.dev/cargo-dist/book/
+
+[workspace]
+members = ["cargo:oximy-gateway"]
+
+[dist]
+# cargo-dist version pinned for reproducible installs
+cargo-dist-version = "0.28.0"
+
+# Platforms to release for
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+]
+
+# Installers to generate
+installers = ["shell", "homebrew"]
+
+# Shell installer: users run `curl -fsSL .../install.sh | sh`
+install-path = ["$HOME/.local/bin", "$CARGO_HOME/bin", "~/.local/bin"]
+
+# GitHub Releases: create a release with all artifacts on tag push
+hosting = ["github"]
+
+# Sign artifacts (github provides OIDC; also produces SHA256 checksums)
+# cargo-dist generates checksums automatically
+checksum = "sha256"
+
+# Minimum cargo-dist version that consumers must have
+min-cargo-dist-version = "0.28.0"
+
+# Use the workspace's release profile (lto/strip already set in Cargo.toml)
+# No additional dist-specific release profile overrides needed.
+
+# Homebrew formula repo (optional — set to your tap repo when ready)
+# tap = "oximyhq/homebrew-gateway"
+# formula = "oximy-gateway"
+
+# Extra files to include in each release archive
+# (e.g. docs, examples — omit if you only want the binary)
+# include = []
+
+# Workspace package to publish — the binary crate
+[package.oximy-gateway]
+# Override binary description shown in installers
+app-desc = "Unified LLM + MCP gateway — single static binary with embedded dashboard"

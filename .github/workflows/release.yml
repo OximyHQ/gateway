@@ -1,0 +1,237 @@
+# release.yml — Triggers on v* tags (e.g. v0.1.0).
+# Builds oximy-gateway cross-platform via cargo-dist, produces SHA-256 checksums,
+# and creates a GitHub Release with all artifacts + a shell installer.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (e.g. v0.1.0) — must already exist"
+        required: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # cargo-dist will read this to know what version to install itself
+  CARGO_DIST_VERSION: "0.28.0"
+
+jobs:
+  # ── Plan: cargo-dist works out what to build ───────────────────────────────
+  plan:
+    name: Plan release
+    runs-on: ubuntu-latest
+    outputs:
+      val: ${{ steps.plan.outputs.manifest }}
+      tag: ${{ !github.event.inputs.tag && github.ref_name || github.event.inputs.tag }}
+      tag-flag: ${{ !github.event.inputs.tag && format('--tag={0}', github.ref_name) || format('--tag={0}', github.event.inputs.tag) }}
+      publishing: ${{ steps.plan.outputs.publishing }}
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install cargo-dist
+        run: |
+          curl --proto '=https' --tlsv1.2 -LsSf \
+            "https://github.com/axodotdev/cargo-dist/releases/download/v${CARGO_DIST_VERSION}/cargo-dist-installer.sh" \
+            | sh
+
+      - name: Plan
+        id: plan
+        run: |
+          cargo dist plan ${{ !github.event.inputs.tag && format('--tag={0}', github.ref_name) || format('--tag={0}', github.event.inputs.tag) }} \
+            --output-format=json --no-local-paths 2>/dev/null \
+            | tee /tmp/cargo-dist-plan.json
+          echo "manifest=$(cat /tmp/cargo-dist-plan.json)" >> "$GITHUB_OUTPUT"
+          echo "publishing=true" >> "$GITHUB_OUTPUT"
+
+  # ── Build matrix (one job per platform) ────────────────────────────────────
+  build:
+    name: Build ${{ matrix.target }}
+    needs: plan
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macOS arm64 (Apple Silicon)
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            ext: ""
+          # macOS x86_64 (Intel)
+          - target: x86_64-apple-darwin
+            os: macos-13
+            ext: ""
+          # Linux x86_64
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+            ext: ""
+          # Linux arm64 — uses cross for cross-compilation
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-22.04
+            ext: ""
+            cross: true
+          # Windows x86_64
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            ext: ".exe"
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.92"
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Install cross (Linux aarch64 only)
+        if: matrix.cross
+        run: cargo install cross --locked
+
+      - name: Build release binary (native)
+        if: "!matrix.cross"
+        run: |
+          cargo build --release --bin oximy-gateway --target ${{ matrix.target }}
+
+      - name: Build release binary (cross)
+        if: matrix.cross
+        run: |
+          cross build --release --bin oximy-gateway --target ${{ matrix.target }}
+
+      - name: Stage artifact
+        shell: bash
+        run: |
+          BIN="oximy-gateway${{ matrix.ext }}"
+          SRC="target/${{ matrix.target }}/release/${BIN}"
+          ARCHIVE_NAME="oximy-gateway-${{ matrix.target }}"
+          mkdir -p dist-artifacts
+
+          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+            cp "${SRC}" "dist-artifacts/${BIN}"
+            cd dist-artifacts
+            7z a "${ARCHIVE_NAME}.zip" "${BIN}"
+            ARTIFACT="${ARCHIVE_NAME}.zip"
+          else
+            cp "${SRC}" "dist-artifacts/${BIN}"
+            cd dist-artifacts
+            tar czf "${ARCHIVE_NAME}.tar.gz" "${BIN}"
+            ARTIFACT="${ARCHIVE_NAME}.tar.gz"
+          fi
+
+          # SHA-256 checksum (one file per archive)
+          sha256sum "${ARTIFACT}" > "${ARTIFACT}.sha256" 2>/dev/null \
+            || shasum -a 256 "${ARTIFACT}" > "${ARTIFACT}.sha256"
+
+          echo "ARTIFACT=${ARTIFACT}" >> "$GITHUB_ENV"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifacts-${{ matrix.target }}
+          path: dist-artifacts/
+          if-no-files-found: error
+
+  # ── Collate checksums + create GitHub Release ───────────────────────────────
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist-artifacts/
+          merge-multiple: true
+
+      - name: Collate checksums
+        run: |
+          cd dist-artifacts
+          # Concatenate individual .sha256 files into one SHA256SUMS
+          cat *.sha256 > SHA256SUMS
+          echo "=== SHA256SUMS ==="
+          cat SHA256SUMS
+
+      - name: Determine tag
+        id: tag
+        run: |
+          if [ -n "${{ github.event.inputs.tag }}" ]; then
+            echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Generate install instructions
+        id: install_hint
+        run: |
+          TAG="${{ steps.tag.outputs.tag }}"
+          cat > install_hint.txt << 'EOF'
+          ## Install
+
+          **Shell (Linux / macOS):**
+          ```sh
+          curl -fsSL https://raw.githubusercontent.com/oximyhq/gateway/main/install.sh | sh
+          ```
+
+          **macOS (Homebrew):**
+          ```sh
+          brew install oximyhq/tap/oximy-gateway
+          ```
+
+          **Docker:**
+          ```sh
+          docker run --rm -p 8080:8080 ghcr.io/oximyhq/gateway:TAG
+          ```
+
+          **Direct download:** See the assets below for your platform, then:
+          ```sh
+          tar xzf oximy-gateway-<target>.tar.gz
+          mv oximy-gateway ~/.local/bin/
+          oximy-gateway up
+          ```
+
+          ## Verify checksums
+          ```sh
+          sha256sum -c SHA256SUMS
+          ```
+          EOF
+          sed -i "s/TAG/${TAG}/g" install_hint.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: "Oximy Gateway ${{ steps.tag.outputs.tag }}"
+          body_path: install_hint.txt
+          draft: false
+          prerelease: ${{ contains(steps.tag.outputs.tag, '-') }}
+          files: |
+            dist-artifacts/*.tar.gz
+            dist-artifacts/*.zip
+            dist-artifacts/*.sha256
+            dist-artifacts/SHA256SUMS
+          generate_release_notes: true
+          make_latest: true
