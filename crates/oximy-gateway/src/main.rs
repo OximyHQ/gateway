@@ -64,12 +64,12 @@ async fn run_up_async(args: UpArgs) -> anyhow::Result<()> {
     use gateway_cache::build_registry;
     use gateway_control::cache_handle::memory_cache_handle;
     use gateway_control::guard::default_chain;
-    use gateway_control::keystore::StaticKeyStore;
+    use gateway_control::keystore::{MutableKeyStore, PersistHook};
     use gateway_control::providers::{Deployment, ProviderRegistry};
     use gateway_control::state::AppState;
     use gateway_llm::Credentials;
     use gateway_llm::transports::openai::OpenAi;
-    use gateway_spine::{MemoryAudit, SystemClock, Usd};
+    use gateway_spine::{MemoryAudit, SystemClock, Usd, VirtualKey};
 
     // ── 1. Resolve + create the state directory ───────────────────────────────
     let data_dir = cli::resolve_data_dir(args.dir.as_deref())?;
@@ -78,11 +78,11 @@ async fn run_up_async(args: UpArgs) -> anyhow::Result<()> {
     tracing::info!(dir = %data_dir.display(), "data directory");
 
     // ── 2. Load or initialize the key store from the JSON state file ──────────
-    let sf = state_file::StateFile::load_or_create(&state_path)?;
+    let sf = Arc::new(state_file::StateFile::load_or_create(&state_path)?);
 
     // First boot: seed admin key, persist, print once.
     let clock = SystemClock;
-    if let Some(minted) = firstboot::ensure_admin_key(&sf, &clock)? {
+    if let Some(minted) = firstboot::ensure_admin_key(sf.as_ref(), &clock)? {
         sf.save(&state_path)?;
         print_minted_key(&minted);
     } else if args.print_key {
@@ -98,11 +98,29 @@ async fn run_up_async(args: UpArgs) -> anyhow::Result<()> {
     let config_path = data_dir.join("oximy-gateway.json");
     let config = load_or_seed_config(&config_path)?;
 
-    // ── 3. Build the in-memory key store ──────────────────────────────────────
-    let mut ks = StaticKeyStore::new();
-    for key in sf.load_keys() {
-        ks.insert(key);
+    // ── 3. Build the mutable, live key store with a file-persistence hook ─────
+    // The hook is called after every `insert` / `revoke` to write the state file.
+    struct FileHook {
+        sf: Arc<state_file::StateFile>,
+        path: std::path::PathBuf,
     }
+    impl PersistHook for FileHook {
+        fn persist(&self, keys: &[VirtualKey]) -> anyhow::Result<()> {
+            // Re-populate the state file from the live key list.
+            for k in keys {
+                crate::firstboot::KeyStore::insert_key(self.sf.as_ref(), k)?;
+            }
+            self.sf.save(&self.path)
+        }
+    }
+
+    let hook = Arc::new(FileHook {
+        sf: Arc::clone(&sf),
+        path: state_path.clone(),
+    });
+    let ks = Arc::new(MutableKeyStore::with_hook(hook));
+    // Seed from the state file without calling the persist hook.
+    ks.seed(sf.load_keys());
 
     // ── 4. Register LLM providers from env vars ───────────────────────────────
     let mut providers = ProviderRegistry::new();
@@ -269,13 +287,14 @@ async fn run_up_async(args: UpArgs) -> anyhow::Result<()> {
 
     // ── 6a. Build AppState (with L1 cache pre-wired) ─────────────────────────
     let mut state_inner = AppState::with_parts_and_telemetry(
-        Arc::new(ks),
+        ks,
         Arc::new(SystemClock),
         providers,
         Arc::new(default_chain()),
         Arc::new(MemoryAudit::new()),
         telem_sink,
         metrics,
+        Arc::clone(&spend_store) as Arc<dyn gateway_telemetry::SpendStore>,
     );
 
     {

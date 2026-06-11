@@ -956,6 +956,7 @@ dependencies = [
 name = "gateway-control"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "async-trait",
  "axum 0.8.9",
  "futures",
@@ -968,6 +969,7 @@ dependencies = [
  "gateway-spine",
  "gateway-telemetry",
  "http",
+ "rand 0.8.6",
  "reqwest 0.12.28",
  "serde",
  "serde_json",

@@ -14,7 +14,7 @@ use gateway_route::Route;
 use gateway_spine::{
     AuditSink, BudgetLedger, Clock, MemoryAudit, ModelRegistry, RateLimiter, SystemClock,
 };
-use gateway_telemetry::{GatewayMetrics, MemorySpendStore, TelemetrySink, spawn};
+use gateway_telemetry::{GatewayMetrics, MemorySpendStore, SpendStore, TelemetrySink, spawn};
 
 // Re-export so callers that need to build a sink don't depend on gateway-telemetry directly.
 pub use gateway_telemetry::{DEFAULT_CHANNEL_CAPACITY, TelemetryWriter};
@@ -55,6 +55,10 @@ pub struct AppState<C: Clock = SystemClock> {
     /// `C`-generic struct without constraining `C`. `None` → all requests are
     /// cache-bypassed (the default for tests that don't need caching).
     pub cache: Option<Arc<dyn CacheHandle>>,
+    /// The live spend store shared between the telemetry writer and the admin
+    /// endpoints. The telemetry writer appends rows; the admin endpoints read.
+    /// `Arc<dyn SpendStore>` lets tests inject a `MemorySpendStore`.
+    pub spend_store: Arc<dyn SpendStore>,
 }
 
 impl AppState<SystemClock> {
@@ -88,12 +92,15 @@ impl<C: Clock> AppState<C> {
             Arc::clone(&metrics),
             gateway_telemetry::DEFAULT_CHANNEL_CAPACITY,
         );
-        Self::with_parts_and_telemetry(keys, clock, providers, guard, audit, telemetry, metrics)
+        Self::with_parts_and_telemetry(
+            keys, clock, providers, guard, audit, telemetry, metrics, store,
+        )
     }
 
     /// Full constructor with explicit telemetry injection. Used by the binary
     /// (which pre-builds the metrics + sink) and by integration tests that
     /// assert on `/metrics` content.
+    #[allow(clippy::too_many_arguments)]
     pub fn with_parts_and_telemetry(
         keys: Arc<dyn KeyStore>,
         clock: Arc<C>,
@@ -102,6 +109,7 @@ impl<C: Clock> AppState<C> {
         audit: Arc<dyn AuditSink>,
         telemetry: TelemetrySink,
         metrics: Arc<GatewayMetrics>,
+        spend_store: Arc<dyn SpendStore>,
     ) -> Self {
         // Arc<C>: Clock via the blanket impl in gateway-spine, so RateLimiter<Arc<C>> works.
         let limiter = Arc::new(RateLimiter::new(clock.clone()));
@@ -122,6 +130,7 @@ impl<C: Clock> AppState<C> {
             telemetry,
             metrics,
             cache: None,
+            spend_store,
         }
     }
 
@@ -166,5 +175,20 @@ mod tests {
             Arc::new(MemoryAudit::new()),
         );
         assert!(state.cache.is_none());
+    }
+
+    #[tokio::test]
+    async fn spend_store_is_accessible() {
+        let ks = StaticKeyStore::new();
+        let clock = Arc::new(MockClock::new(0));
+        let state = AppState::with_parts(
+            Arc::new(ks),
+            clock,
+            ProviderRegistry::new(),
+            Arc::new(crate::guard::empty_chain()),
+            Arc::new(MemoryAudit::new()),
+        );
+        // No rows yet; just check it's wired.
+        assert_eq!(state.spend_store.row_count(), 0);
     }
 }

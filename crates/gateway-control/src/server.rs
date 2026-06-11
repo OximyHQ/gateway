@@ -31,12 +31,17 @@ use crate::wire::{WireChatRequest, WireChatResponse};
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Build the full API router over a shared state. Includes `/health` (unauthenticated
-/// liveness probe), `/metrics` (authenticated Prometheus, design §2/§11), and all
-/// `/v1/*` endpoints. Unknown `/v1/*` paths return 404 — NOT the SPA HTML — so the
+/// liveness probe), `/metrics` (authenticated Prometheus, design §2/§11), all
+/// `/v1/*` data-plane endpoints, and all `/v1/admin/*` + `/v1/usage` admin
+/// endpoints. Unknown `/v1/*` paths return 404 — NOT the SPA HTML — so the
 /// SPA catch-all in the binary only covers non-API paths. The `/` dashboard is
 /// mounted by the binary via `gateway_dash::dash_router()` merged as the fallback
 /// layer after this router.
 pub fn router<C: Clock + 'static>(state: Arc<AppState<C>>) -> Router {
+    // Admin sub-router (mounted first so its /v1/admin/* routes match before
+    // the catch-all /v1/{*rest}).
+    let admin = crate::admin::admin_router(Arc::clone(&state));
+
     Router::new()
         .route("/health", get(health))
         .route("/metrics", get(metrics_handler::<C>))
@@ -51,6 +56,8 @@ pub fn router<C: Clock + 'static>(state: Arc<AppState<C>>) -> Router {
         // intercepts an API miss and falsely returns 200 with HTML.
         .route("/v1/{*rest}", get(v1_not_found).post(v1_not_found))
         .with_state(state)
+        // Merge the admin routes after the main state is bound.
+        .merge(admin)
 }
 
 /// Bind a `TcpListener` at `addr` and run the gateway server.
@@ -894,6 +901,7 @@ mod tests {
             Arc::new(MemoryAudit::new()),
             sink,
             Arc::clone(&metrics),
+            Arc::clone(&store) as Arc<dyn gateway_telemetry::SpendStore>,
         ));
         state.registry.write().unwrap().insert(gpt4o());
         state

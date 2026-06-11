@@ -11,9 +11,11 @@
 
 #![forbid(unsafe_code)]
 
+pub mod admin;
 pub mod auth;
 pub mod cache_handle;
 pub mod error;
+pub mod firstboot_shim;
 pub mod gateway;
 pub mod guard;
 pub mod keystore;
@@ -25,11 +27,13 @@ pub mod sse_out;
 pub mod state;
 pub mod wire;
 
+pub use admin::admin_router;
 pub use auth::{authenticate, parse_bearer};
 pub use error::GatewayError;
+pub use firstboot_shim::generate_secret;
 pub use gateway::{Completed, CompletedStream, Gateway};
 pub use guard::{AllowAll, GuardHook, GuardVerdict};
-pub use keystore::{KeyStore, StaticKeyStore};
+pub use keystore::{KeyStore, MutableKeyStore, NoPersist, PersistHook, StaticKeyStore};
 pub use providers::{Deployment, ProviderRegistry};
 pub use route_exec::RegistryExecutor;
 pub use server::{router, serve};

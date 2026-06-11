@@ -37,6 +37,17 @@ impl ProviderRegistry {
     pub fn is_empty(&self) -> bool {
         self.by_id.is_empty()
     }
+
+    pub fn count(&self) -> usize {
+        self.by_id.len()
+    }
+
+    /// Sorted list of all registered provider ids.
+    pub fn all_ids(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.by_id.keys().cloned().collect();
+        v.sort();
+        v
+    }
 }
 
 #[cfg(test)]
