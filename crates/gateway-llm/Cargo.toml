@@ -15,3 +15,12 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }
 gateway-spine = { workspace = true }
+reqwest = { workspace = true }
+futures = { workspace = true }
+tokio-stream = { workspace = true }
+async-trait = { workspace = true }
+bytes = { workspace = true }
+
+[dev-dependencies]
+wiremock = { workspace = true }
+serde_json = { workspace = true }
