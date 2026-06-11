@@ -37,7 +37,9 @@ pub use hot_registry::HotRegistry;
 pub use key::CacheKey;
 pub use layer::CacheLayer;
 pub use memory::MemoryStore;
-pub use registry_source::{build_registry, build_registry_from_paths};
+pub use registry_source::{
+    build_registry, build_registry_from_models_dev, build_registry_from_paths,
+};
 pub use replay::{replay_stream, replay_unary};
 pub use stats::{CacheStats, CacheStatsSnapshot};
 pub use status::{CacheOutcome, CacheStatus};
