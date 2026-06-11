@@ -292,7 +292,7 @@ async fn models<C: Clock + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::guard::AllowAll;
+    use crate::guard::empty_chain;
     use crate::keystore::StaticKeyStore;
     use crate::providers::{Deployment, ProviderRegistry};
     use async_trait::async_trait;
@@ -406,7 +406,7 @@ mod tests {
             Arc::new(ks),
             Arc::new(MockClock::new(0)),
             providers,
-            Arc::new(AllowAll),
+            Arc::new(empty_chain()),
             Arc::new(MemoryAudit::new()),
         ));
         state.registry.write().unwrap().insert(gpt4o());
@@ -663,7 +663,7 @@ mod tests {
             Arc::new(ks),
             Arc::new(MockClock::new(0)),
             providers,
-            Arc::new(AllowAll),
+            Arc::new(empty_chain()),
             Arc::new(MemoryAudit::new()),
             sink,
             Arc::clone(&metrics),

@@ -14,11 +14,11 @@
 use std::sync::Arc;
 
 use futures::stream::{Stream, StreamExt};
-use gateway_llm::{ChatRequest, ChatResponse, ProviderError, StreamDelta};
+use gateway_guard::{GuardContext, GuardStage, GuardVerdict};
+use gateway_llm::{ChatRequest, ChatResponse, ContentPart, ProviderError, Role, StreamDelta};
 use gateway_spine::{AuditEvent, ReservationId, Usd, VirtualKey};
 
 use crate::error::GatewayError;
-use crate::guard::GuardVerdict;
 use crate::state::AppState;
 
 /// A completed non-streaming call: the provider response plus the authoritative
@@ -77,6 +77,57 @@ impl<C: gateway_spine::Clock> AppState<C> {
     }
 }
 
+/// Concatenate all user-authored prompt text in a request — the surface the
+/// `PreRequest` guard inspects. System/assistant/tool turns are excluded so the
+/// guard reasons about the caller's own content.
+fn user_prompt_text(req: &ChatRequest) -> String {
+    req.messages
+        .iter()
+        .filter(|m| m.role == Role::User)
+        .map(|m| m.text_content())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Replace every user message's text content with `masked` (single combined
+/// blob) while preserving non-text parts (images) and non-user turns. Used when
+/// the `PreRequest` guard returns a `Mask` verdict.
+fn apply_user_mask(req: &mut ChatRequest, masked: &str) {
+    let mut applied = false;
+    for m in req.messages.iter_mut() {
+        if m.role != Role::User {
+            continue;
+        }
+        // Keep any image parts; replace the text with the masked blob exactly once.
+        let images: Vec<ContentPart> = m
+            .content
+            .iter()
+            .filter(|p| matches!(p, ContentPart::Image { .. }))
+            .cloned()
+            .collect();
+        m.content.clear();
+        if !applied {
+            m.content.push(ContentPart::text(masked.to_string()));
+            applied = true;
+        }
+        m.content.extend(images);
+    }
+}
+
+/// Replace a response's text content with `masked`, preserving any non-text
+/// (image) parts and the tool calls. Used when the `PostResponse` guard masks.
+fn mask_response_text(resp: &mut ChatResponse, masked: &str) {
+    let images: Vec<ContentPart> = resp
+        .content
+        .iter()
+        .filter(|p| matches!(p, ContentPart::Image { .. }))
+        .cloned()
+        .collect();
+    resp.content.clear();
+    resp.content.push(ContentPart::text(masked.to_string()));
+    resp.content.extend(images);
+}
+
 /// The lifecycle. Generic over the clock so tests inject `MockClock`.
 pub struct Gateway;
 
@@ -88,7 +139,12 @@ impl Gateway {
         key: &VirtualKey,
         req: &ChatRequest,
     ) -> Result<Completed, GatewayError> {
-        let model = req.model.as_str();
+        // Owned request: the PreRequest guard may rewrite the prompt (Mask), so
+        // the value we hand to egress can differ from the caller's input.
+        let mut req = req.clone();
+        let req = &mut req;
+        let model = req.model.clone();
+        let model = model.as_str();
 
         // 1. model allowlist
         if !key.allows_model(model) {
@@ -166,13 +222,29 @@ impl Gateway {
             }
         };
 
-        // 5. guard pre-hook (stub Allow in P1.4). A deny releases reservation +
-        //    parallel slot before any egress.
-        if let GuardVerdict::Deny { reason } = state.guard.pre(req) {
-            let _ = state.ledger.release(reservation);
-            state.limiter.release_parallel(&key.id);
-            Self::audit(state, key, "request.denied", model, "denied", &reason);
-            return Err(GatewayError::BadRequest(format!("guard denied: {reason}")));
+        // 5. PreRequest guard over the user prompt. A Block releases the
+        //    reservation + parallel slot before any egress (403); a Mask rewrites
+        //    the outgoing prompt in place. Runs BEFORE egress so a secret-laden
+        //    prompt is never forwarded upstream.
+        let pre_ctx = GuardContext {
+            stage: GuardStage::PreRequest,
+            text: user_prompt_text(req),
+            key_id: Some(key.id.clone()),
+            model: Some(model.to_string()),
+            tags: vec![],
+        };
+        match state.guard.run(&pre_ctx).await.final_verdict {
+            GuardVerdict::Block { reason } => {
+                let _ = state.ledger.release(reservation);
+                state.limiter.release_parallel(&key.id);
+                Self::audit(state, key, "request.denied", model, "denied", &reason);
+                return Err(GatewayError::GuardBlocked(reason));
+            }
+            GuardVerdict::Mask { redacted_text } => {
+                apply_user_mask(req, &redacted_text);
+                Self::audit(state, key, "guard.masked", model, "masked", "pre_request");
+            }
+            GuardVerdict::Allow | GuardVerdict::Flag { .. } => {}
         }
 
         // 6. egress — mint ONE idempotency key (no-double-billing) and call the
@@ -182,7 +254,7 @@ impl Gateway {
             .provider
             .chat(req, &deployment.credentials, &idempotency_key)
             .await;
-        let response = match result {
+        let mut response = match result {
             Ok(r) => r,
             Err(e) => {
                 let _ = state.ledger.release(reservation);
@@ -194,6 +266,9 @@ impl Gateway {
 
         // 7. commit ACTUAL cost from provider usage (true-up). Cost is computed
         //    from the registry — never guessed. Then release the parallel slot.
+        //    Cost is committed regardless of the PostResponse guard verdict: the
+        //    provider was billed, so we record the true spend even if we then
+        //    block/redact the content the caller sees.
         let actual_cost = {
             let reg = state.registry.read().unwrap();
             reg.cost(model, &response.usage).unwrap_or(Usd::ZERO)
@@ -203,6 +278,27 @@ impl Gateway {
             .commit(reservation, actual_cost)
             .map_err(GatewayError::Spine)?;
         state.limiter.release_parallel(&key.id);
+
+        // 8. PostResponse guard over the assistant output. Block → 403 (the
+        //    completion is withheld); Mask → redact the returned text in place.
+        let post_ctx = GuardContext {
+            stage: GuardStage::PostResponse,
+            text: response.text(),
+            key_id: Some(key.id.clone()),
+            model: Some(model.to_string()),
+            tags: vec![],
+        };
+        match state.guard.run(&post_ctx).await.final_verdict {
+            GuardVerdict::Block { reason } => {
+                Self::audit(state, key, "response.blocked", model, "denied", &reason);
+                return Err(GatewayError::GuardBlocked(reason));
+            }
+            GuardVerdict::Mask { redacted_text } => {
+                mask_response_text(&mut response, &redacted_text);
+                Self::audit(state, key, "guard.masked", model, "masked", "post_response");
+            }
+            GuardVerdict::Allow | GuardVerdict::Flag { .. } => {}
+        }
 
         Self::audit(
             state,
@@ -231,6 +327,9 @@ impl Gateway {
         key: &VirtualKey,
         req: &ChatRequest,
     ) -> Result<CompletedStream, GatewayError> {
+        // Owned request so the PreRequest guard can rewrite the prompt (Mask).
+        let mut req = req.clone();
+        let req = &mut req;
         let model = req.model.clone();
 
         if !key.allows_model(&model) {
@@ -284,10 +383,28 @@ impl Gateway {
             }
         };
 
-        if let GuardVerdict::Deny { reason } = state.guard.pre(req) {
-            let _ = state.ledger.release(reservation);
-            state.limiter.release_parallel(&key.id);
-            return Err(GatewayError::BadRequest(format!("guard denied: {reason}")));
+        // PreRequest guard over the prompt. Block → 403 before egress; Mask →
+        // rewrite the prompt. PostResponse content guarding is not applied to
+        // streamed output (we never buffer the whole stream — that would defeat
+        // streaming); secrets/PII on the egress prompt are still caught here.
+        let pre_ctx = GuardContext {
+            stage: GuardStage::PreRequest,
+            text: user_prompt_text(req),
+            key_id: Some(key.id.clone()),
+            model: Some(model.clone()),
+            tags: vec![],
+        };
+        match state.guard.run(&pre_ctx).await.final_verdict {
+            GuardVerdict::Block { reason } => {
+                let _ = state.ledger.release(reservation);
+                state.limiter.release_parallel(&key.id);
+                Self::audit(&state, key, "request.denied", &model, "denied", &reason);
+                return Err(GatewayError::GuardBlocked(reason));
+            }
+            GuardVerdict::Mask { redacted_text } => {
+                apply_user_mask(req, &redacted_text);
+            }
+            GuardVerdict::Allow | GuardVerdict::Flag { .. } => {}
         }
 
         let idempotency_key = uuid::Uuid::new_v4().to_string();
@@ -397,7 +514,7 @@ impl Gateway {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::guard::AllowAll;
+    use crate::guard::empty_chain;
     use crate::keystore::StaticKeyStore;
     use crate::providers::{Deployment, ProviderRegistry};
     use async_trait::async_trait;
@@ -415,6 +532,7 @@ mod tests {
     struct MockProvider {
         calls: AtomicUsize,
         last_idem: std::sync::Mutex<Option<String>>,
+        last_prompt: std::sync::Mutex<Option<String>>,
         usage: TokenUsage,
     }
 
@@ -423,6 +541,7 @@ mod tests {
             Self {
                 calls: AtomicUsize::new(0),
                 last_idem: std::sync::Mutex::new(None),
+                last_prompt: std::sync::Mutex::new(None),
                 usage,
             }
         }
@@ -449,6 +568,13 @@ mod tests {
         ) -> Result<ChatResponse, ProviderError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             *self.last_idem.lock().unwrap() = Some(idempotency_key.to_string());
+            *self.last_prompt.lock().unwrap() = Some(
+                req.messages
+                    .iter()
+                    .map(|m| m.text_content())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            );
             Ok(ChatResponse {
                 model: req.model.clone(),
                 content: vec![ContentPart::text("hello")],
@@ -516,7 +642,35 @@ mod tests {
             Arc::new(ks),
             Arc::new(MockClock::new(1_000)),
             providers,
-            Arc::new(AllowAll),
+            Arc::new(empty_chain()),
+            Arc::new(MemoryAudit::new()),
+        );
+        state.registry.write().unwrap().insert(gpt4o());
+        state.ledger.set_budget("key_1", budget, Usd::ZERO);
+        state
+    }
+
+    /// Like `state_with` but installs the production `default_chain` guard
+    /// (secrets-block + PII-mask) so guard integration can be exercised.
+    fn state_with_default_guard(
+        provider: Arc<MockProvider>,
+        budget: Option<Usd>,
+    ) -> AppState<MockClock> {
+        let mut ks = StaticKeyStore::new();
+        ks.insert(key(budget, None, RateLimits::default()));
+        let mut providers = ProviderRegistry::new();
+        providers.insert(
+            "openai",
+            Deployment {
+                provider: provider.clone(),
+                credentials: Arc::new(Credentials::new("sk-up")),
+            },
+        );
+        let state = AppState::with_parts(
+            Arc::new(ks),
+            Arc::new(MockClock::new(1_000)),
+            providers,
+            Arc::new(crate::guard::default_chain()),
             Arc::new(MemoryAudit::new()),
         );
         state.registry.write().unwrap().insert(gpt4o());
@@ -526,6 +680,91 @@ mod tests {
 
     fn chat_req() -> ChatRequest {
         ChatRequest::new("gpt-4o", vec![Message::text(Role::User, "hi there")])
+    }
+
+    #[tokio::test]
+    async fn guard_blocks_secret_prompt_before_egress() {
+        let provider = Arc::new(MockProvider::new(TokenUsage::default()));
+        let state = state_with_default_guard(provider.clone(), Some(Usd::from_dollars_f64(1.0)));
+        let k = key(
+            Some(Usd::from_dollars_f64(1.0)),
+            None,
+            RateLimits::default(),
+        );
+
+        // A live OpenAI-shaped key in the prompt must be blocked pre-egress.
+        let req = ChatRequest::new(
+            "gpt-4o",
+            vec![Message::text(
+                Role::User,
+                "please use my key sk-ant-api03-FAKEFAKEFAKEFAKEFAKE to call the api",
+            )],
+        );
+        let err = Gateway::run(&state, &k, &req).await.unwrap_err();
+        assert_eq!(err.status(), axum::http::StatusCode::FORBIDDEN);
+        assert!(matches!(err, GatewayError::GuardBlocked(_)));
+        // The provider must NOT have been called, and no spend/reservation leaked.
+        assert_eq!(
+            provider.calls.load(Ordering::SeqCst),
+            0,
+            "secret prompt must never reach the provider"
+        );
+        assert_eq!(state.ledger.reserved("key_1"), Usd::ZERO);
+        assert_eq!(state.ledger.spent("key_1"), Usd::ZERO);
+    }
+
+    #[tokio::test]
+    async fn guard_masks_pii_prompt_then_calls_provider() {
+        let usage = TokenUsage {
+            input_tokens: 100,
+            output_tokens: 50,
+            ..Default::default()
+        };
+        let provider = Arc::new(MockProvider::new(usage));
+        let state = state_with_default_guard(provider.clone(), Some(Usd::from_dollars_f64(1.0)));
+        let k = key(
+            Some(Usd::from_dollars_f64(1.0)),
+            None,
+            RateLimits::default(),
+        );
+
+        let req = ChatRequest::new(
+            "gpt-4o",
+            vec![Message::text(
+                Role::User,
+                "email me at alice@example.com about the order",
+            )],
+        );
+        // PII is masked, not blocked — the call still succeeds.
+        let done = Gateway::run(&state, &k, &req).await.unwrap();
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(done.response.text(), "hello");
+        // The provider saw the masked prompt (no raw email).
+        let seen = provider.last_prompt.lock().unwrap().clone().unwrap();
+        assert!(
+            !seen.contains("alice@example.com"),
+            "provider must see redacted prompt, got: {seen}"
+        );
+        assert!(seen.contains("[EMAIL]"));
+    }
+
+    #[tokio::test]
+    async fn guard_allows_clean_prompt() {
+        let usage = TokenUsage {
+            input_tokens: 100,
+            output_tokens: 50,
+            ..Default::default()
+        };
+        let provider = Arc::new(MockProvider::new(usage));
+        let state = state_with_default_guard(provider.clone(), Some(Usd::from_dollars_f64(1.0)));
+        let k = key(
+            Some(Usd::from_dollars_f64(1.0)),
+            None,
+            RateLimits::default(),
+        );
+        let done = Gateway::run(&state, &k, &chat_req()).await.unwrap();
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(done.response.text(), "hello");
     }
 
     #[tokio::test]
@@ -664,7 +903,7 @@ mod tests {
             Arc::new(ks),
             Arc::new(MockClock::new(0)),
             providers,
-            Arc::new(AllowAll),
+            Arc::new(empty_chain()),
             Arc::new(MemoryAudit::new()),
         );
         state.registry.write().unwrap().insert(gpt4o());
@@ -753,7 +992,7 @@ mod tests {
             Arc::new(ks),
             Arc::new(MockClock::new(0)),
             providers,
-            Arc::new(AllowAll),
+            Arc::new(empty_chain()),
             Arc::new(MemoryAudit::new()),
         ));
         state.registry.write().unwrap().insert(gpt4o());
@@ -849,7 +1088,7 @@ mod tests {
             Arc::new(ks),
             Arc::new(MockClock::new(0)),
             providers,
-            Arc::new(AllowAll),
+            Arc::new(empty_chain()),
             Arc::new(MemoryAudit::new()),
         ));
         state.registry.write().unwrap().insert(gpt4o());

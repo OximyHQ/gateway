@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use gateway_control::guard::AllowAll;
+use gateway_control::guard::empty_chain;
 use gateway_control::keystore::StaticKeyStore;
 use gateway_control::providers::{Deployment, ProviderRegistry};
 use gateway_control::state::AppState;
@@ -109,7 +109,7 @@ fn build_state() -> Arc<AppState<MockClock>> {
         Arc::new(ks),
         Arc::new(MockClock::new(0)),
         providers,
-        Arc::new(AllowAll),
+        Arc::new(empty_chain()),
         Arc::new(MemoryAudit::new()),
     ));
     state.registry.write().unwrap().insert(gpt4o());

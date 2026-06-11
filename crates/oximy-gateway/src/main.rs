@@ -50,7 +50,7 @@ fn run_up(args: UpArgs) -> anyhow::Result<()> {
 }
 
 async fn run_up_async(args: UpArgs) -> anyhow::Result<()> {
-    use gateway_control::guard::AllowAll;
+    use gateway_control::guard::default_chain;
     use gateway_control::keystore::StaticKeyStore;
     use gateway_control::providers::{Deployment, ProviderRegistry};
     use gateway_control::state::AppState;
@@ -185,7 +185,7 @@ async fn run_up_async(args: UpArgs) -> anyhow::Result<()> {
         Arc::new(ks),
         Arc::new(SystemClock),
         providers,
-        Arc::new(AllowAll),
+        Arc::new(default_chain()),
         Arc::new(MemoryAudit::new()),
         telem_sink,
         metrics,

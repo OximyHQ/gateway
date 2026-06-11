@@ -23,6 +23,11 @@ pub enum GatewayError {
     BadRequest(String),
     #[error("feature not supported: {0}")]
     Unsupported(String),
+    /// A guardrail blocked the request or response content (design §2/§P4).
+    /// Mapped to 403 Forbidden so the caller sees a policy denial, never a
+    /// provider/upstream error.
+    #[error("blocked by guardrail: {0}")]
+    GuardBlocked(String),
 }
 
 impl GatewayError {
@@ -56,6 +61,7 @@ impl GatewayError {
             },
             GatewayError::BadRequest(_) => StatusCode::BAD_REQUEST,
             GatewayError::Unsupported(_) => StatusCode::NOT_IMPLEMENTED,
+            GatewayError::GuardBlocked(_) => StatusCode::FORBIDDEN,
         }
     }
 
@@ -68,7 +74,8 @@ impl GatewayError {
             GatewayError::Spine(SpineError::KeyRevoked { .. } | SpineError::KeyExpired { .. }) => {
                 "authentication_error"
             }
-            GatewayError::Spine(SpineError::ModelNotAllowed { .. }) => "permission_error",
+            GatewayError::Spine(SpineError::ModelNotAllowed { .. })
+            | GatewayError::GuardBlocked(_) => "permission_error",
             GatewayError::Spine(SpineError::UnknownModel { .. }) | GatewayError::BadRequest(_) => {
                 "invalid_request_error"
             }

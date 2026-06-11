@@ -1,9 +1,42 @@
-//! The guardrail seam. P4 fills this with PII/injection/moderation stages; P1.4
-//! ships a no-op `AllowAll` so the lifecycle has the call site wired in the
-//! right place (pre-egress) without doing work. A `Deny` short-circuits the
-//! request before any provider egress, exactly like a budget/rate denial.
+//! The guardrail seam. The live lifecycle now runs a real
+//! [`gateway_guard::GuardChain`] (held in [`crate::AppState::guard`]) at the
+//! `PreRequest` and `PostResponse` stages around provider egress. This module
+//! provides the chain builders the binary + tests wire in.
+//!
+//! The legacy no-op `AllowAll`/`GuardHook`/`GuardVerdict` types are retained for
+//! backward compatibility of the public surface but are no longer on the hot
+//! path — the chain is the source of truth.
+
+use std::sync::Arc;
+
+use gateway_guard::builtin::{PiiGuardrail, SecretsGuardrail};
+use gateway_guard::{EnforcementMode, GuardChain};
 
 use gateway_llm::ChatRequest;
+
+/// The production default guard chain.
+///
+/// - **Secrets → Block (Enforce):** a recognised provider API key (OpenAI/AWS/
+///   GitHub/Slack/GitLab shape) in the prompt or completion is a hard block.
+///   Secrets are enforced (not merely observed) because forwarding a live key to
+///   an upstream LLM is an exfiltration event we must stop before egress.
+/// - **PII → Mask (Enforce):** emails/phones/cards/SSNs are redacted in-place so
+///   the request still completes with `[EMAIL]`/`[PHONE]`/… placeholders rather
+///   than failing — masking, not blocking, keeps the gateway useful by default.
+///
+/// Order matters: secrets are checked first so a secret-laden prompt blocks
+/// before any masking work.
+pub fn default_chain() -> GuardChain {
+    GuardChain::new()
+        .push(EnforcementMode::Enforce, Arc::new(SecretsGuardrail::new()))
+        .push(EnforcementMode::Enforce, Arc::new(PiiGuardrail::new()))
+}
+
+/// An empty chain — runs no guardrails (the old `AllowAll` behaviour). Used by
+/// tests and call sites that opt out of content guarding.
+pub fn empty_chain() -> GuardChain {
+    GuardChain::new()
+}
 
 /// The verdict of a guard stage.
 #[derive(Debug, Clone, PartialEq, Eq)]

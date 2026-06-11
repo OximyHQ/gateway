@@ -7,6 +7,7 @@
 
 use std::sync::{Arc, RwLock};
 
+use gateway_guard::GuardChain;
 use gateway_spine::{
     AuditSink, BudgetLedger, Clock, MemoryAudit, ModelRegistry, RateLimiter, SystemClock,
 };
@@ -15,7 +16,7 @@ use gateway_telemetry::{GatewayMetrics, MemorySpendStore, TelemetrySink, spawn};
 // Re-export so callers that need to build a sink don't depend on gateway-telemetry directly.
 pub use gateway_telemetry::{DEFAULT_CHANNEL_CAPACITY, TelemetryWriter};
 
-use crate::guard::{AllowAll, GuardHook};
+use crate::guard::default_chain;
 use crate::keystore::KeyStore;
 use crate::providers::ProviderRegistry;
 
@@ -28,7 +29,9 @@ pub struct AppState<C: Clock = SystemClock> {
     pub limiter: Arc<RateLimiter<Arc<C>>>,
     pub keys: Arc<dyn KeyStore>,
     pub providers: ProviderRegistry,
-    pub guard: Arc<dyn GuardHook>,
+    /// The content-guard chain run at `PreRequest` (over the prompt) and
+    /// `PostResponse` (over the completion). Blocks secrets, masks PII by default.
+    pub guard: Arc<GuardChain>,
     pub audit: Arc<dyn AuditSink>,
     pub clock: Arc<C>,
     /// Non-blocking telemetry sink — `try_send` only, never blocks a request.
@@ -45,7 +48,7 @@ impl AppState<SystemClock> {
             keys,
             Arc::new(SystemClock),
             ProviderRegistry::new(),
-            Arc::new(AllowAll),
+            Arc::new(default_chain()),
             Arc::new(MemoryAudit::new()),
         )
     }
@@ -58,7 +61,7 @@ impl<C: Clock> AppState<C> {
         keys: Arc<dyn KeyStore>,
         clock: Arc<C>,
         providers: ProviderRegistry,
-        guard: Arc<dyn GuardHook>,
+        guard: Arc<GuardChain>,
         audit: Arc<dyn AuditSink>,
     ) -> Self {
         let metrics = Arc::new(GatewayMetrics::new());
@@ -78,7 +81,7 @@ impl<C: Clock> AppState<C> {
         keys: Arc<dyn KeyStore>,
         clock: Arc<C>,
         providers: ProviderRegistry,
-        guard: Arc<dyn GuardHook>,
+        guard: Arc<GuardChain>,
         audit: Arc<dyn AuditSink>,
         telemetry: TelemetrySink,
         metrics: Arc<GatewayMetrics>,
@@ -115,7 +118,7 @@ mod tests {
             Arc::new(ks),
             clock,
             ProviderRegistry::new(),
-            Arc::new(AllowAll),
+            Arc::new(crate::guard::empty_chain()),
             Arc::new(MemoryAudit::new()),
         );
         assert!(state.keys.resolve("sk-x").is_some());

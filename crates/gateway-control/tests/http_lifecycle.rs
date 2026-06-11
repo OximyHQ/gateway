@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use axum::body::{Body, to_bytes};
-use gateway_control::guard::AllowAll;
+use gateway_control::guard::empty_chain;
 use gateway_control::keystore::StaticKeyStore;
 use gateway_control::providers::{Deployment, ProviderRegistry};
 use gateway_control::server::router;
@@ -116,7 +116,7 @@ fn build(budget: Usd) -> (Arc<AppState<MockClock>>, Arc<Counting>) {
         Arc::new(ks),
         Arc::new(MockClock::new(0)),
         providers,
-        Arc::new(AllowAll),
+        Arc::new(empty_chain()),
         Arc::new(MemoryAudit::new()),
     ));
     state.registry.write().unwrap().insert(gpt4o());

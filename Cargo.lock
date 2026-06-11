@@ -960,6 +960,7 @@ dependencies = [
  "axum 0.8.9",
  "futures",
  "gateway-config",
+ "gateway-guard",
  "gateway-llm",
  "gateway-spine",
  "gateway-telemetry",
