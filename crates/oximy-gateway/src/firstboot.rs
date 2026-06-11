@@ -24,7 +24,7 @@ pub struct MintedKey {
     pub key_id: String,
 }
 
-/// A cryptographically random admin secret with the `sk-oximy-` prefix.
+/// A cryptographically random admin secret with the `ogw_` prefix.
 /// Pub so the `keys create` CLI command can mint new secrets with the same format.
 pub fn generate_secret() -> String {
     use rand::Rng;
@@ -34,7 +34,7 @@ pub fn generate_secret() -> String {
     let body: String = (0..40)
         .map(|_| ALPHABET[rng.gen_range(0..ALPHABET.len())] as char)
         .collect();
-    format!("sk-oximy-{body}")
+    format!("ogw_{body}")
 }
 
 /// Seed the default admin key iff the store has no keys. Idempotent: a second
@@ -92,7 +92,7 @@ mod tests {
         let minted = ensure_admin_key(&store, &clock)
             .unwrap()
             .expect("fresh store seeds a key");
-        assert!(minted.secret.starts_with("sk-oximy-"));
+        assert!(minted.secret.starts_with("ogw_"));
         assert_eq!(store.key_count().unwrap(), 1);
 
         // The persisted key stores ONLY the hash, never the secret.
