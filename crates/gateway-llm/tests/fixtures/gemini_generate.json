@@ -1,0 +1,17 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "role": "model",
+        "parts": [ { "text": "Hello from Gemini" } ]
+      },
+      "finishReason": "STOP"
+    }
+  ],
+  "modelVersion": "gemini-1.5-pro",
+  "usageMetadata": {
+    "promptTokenCount": 1000,
+    "candidatesTokenCount": 500,
+    "cachedContentTokenCount": 200
+  }
+}
