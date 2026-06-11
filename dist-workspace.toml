@@ -10,9 +10,11 @@ members = ["cargo:oximy-gateway"]
 cargo-dist-version = "0.28.0"
 
 # Platforms to release for
+# x86_64-apple-darwin omitted: GitHub's x86 macOS runners (macos-13) are retiring
+# and queue indefinitely. Apple Silicon uses aarch64-apple-darwin; Intel-Mac users
+# can `cargo install --git ...` or run the Docker image.
 targets = [
     "aarch64-apple-darwin",
-    "x86_64-apple-darwin",
     "x86_64-unknown-linux-gnu",
     "aarch64-unknown-linux-gnu",
     "x86_64-pc-windows-msvc",
