@@ -1,0 +1,21 @@
+{
+  "model": "gpt-4o",
+  "messages": [
+    { "role": "system", "content": "You are a coding assistant." },
+    { "role": "user", "content": "Refactor this function." }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "apply_patch",
+        "description": "Apply a unified diff to a file.",
+        "parameters": { "type": "object", "properties": { "patch": { "type": "string" } }, "required": ["patch"] }
+      }
+    }
+  ],
+  "tool_choice": "auto",
+  "temperature": 0.2,
+  "stream": true,
+  "logit_bias": { "50256": -100 }
+}
