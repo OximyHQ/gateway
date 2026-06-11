@@ -19,6 +19,7 @@ use gateway_telemetry::{GatewayMetrics, MemorySpendStore, TelemetrySink, spawn};
 // Re-export so callers that need to build a sink don't depend on gateway-telemetry directly.
 pub use gateway_telemetry::{DEFAULT_CHANNEL_CAPACITY, TelemetryWriter};
 
+use crate::cache_handle::CacheHandle;
 use crate::guard::default_chain;
 use crate::keystore::KeyStore;
 use crate::providers::ProviderRegistry;
@@ -50,6 +51,10 @@ pub struct AppState<C: Clock = SystemClock> {
     pub telemetry: TelemetrySink,
     /// Live Prometheus metrics, rendered by the authenticated `/metrics` handler.
     pub metrics: Arc<GatewayMetrics>,
+    /// Optional L1/L2 response cache. Clock-erased so it can be stored in a
+    /// `C`-generic struct without constraining `C`. `None` → all requests are
+    /// cache-bypassed (the default for tests that don't need caching).
+    pub cache: Option<Arc<dyn CacheHandle>>,
 }
 
 impl AppState<SystemClock> {
@@ -116,6 +121,7 @@ impl<C: Clock> AppState<C> {
             clock,
             telemetry,
             metrics,
+            cache: None,
         }
     }
 
@@ -146,5 +152,19 @@ mod tests {
         );
         assert!(state.keys.resolve("sk-x").is_some());
         assert!(state.registry.read().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn cache_is_none_by_default() {
+        let ks = StaticKeyStore::new();
+        let clock = Arc::new(MockClock::new(0));
+        let state = AppState::with_parts(
+            Arc::new(ks),
+            clock,
+            ProviderRegistry::new(),
+            Arc::new(crate::guard::empty_chain()),
+            Arc::new(MemoryAudit::new()),
+        );
+        assert!(state.cache.is_none());
     }
 }

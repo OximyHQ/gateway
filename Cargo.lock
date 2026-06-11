@@ -959,6 +959,7 @@ dependencies = [
  "async-trait",
  "axum 0.8.9",
  "futures",
+ "gateway-cache",
  "gateway-config",
  "gateway-guard",
  "gateway-llm",

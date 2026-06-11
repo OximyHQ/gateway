@@ -16,6 +16,7 @@ tracing = { workspace = true }
 tokio = { workspace = true }
 gateway-spine = { workspace = true }
 gateway-llm = { workspace = true }
+gateway-cache = { workspace = true }
 gateway-config = { workspace = true }
 gateway-telemetry = { workspace = true }
 gateway-guard = { workspace = true }

@@ -33,6 +33,10 @@ impl ProviderRegistry {
     pub fn get(&self, provider_id: &str) -> Option<&Deployment> {
         self.by_id.get(provider_id)
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.by_id.is_empty()
+    }
 }
 
 #[cfg(test)]

@@ -12,6 +12,7 @@
 #![forbid(unsafe_code)]
 
 pub mod auth;
+pub mod cache_handle;
 pub mod error;
 pub mod gateway;
 pub mod guard;
