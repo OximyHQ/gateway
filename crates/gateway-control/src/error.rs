@@ -45,6 +45,11 @@ impl GatewayError {
             GatewayError::Provider(e) => match e {
                 ProviderError::Auth => StatusCode::BAD_GATEWAY,
                 ProviderError::RateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
+                // A 4xx from upstream is the client's fault (bad model, bad request) —
+                // pass it through so callers see 404/400, not a misleading 502.
+                ProviderError::Upstream { status, .. } if (400..500).contains(status) => {
+                    StatusCode::from_u16(*status).unwrap_or(StatusCode::BAD_GATEWAY)
+                }
                 ProviderError::Upstream { .. } => StatusCode::BAD_GATEWAY,
                 ProviderError::Unsupported { .. } => StatusCode::NOT_IMPLEMENTED,
                 ProviderError::Transport(_) | ProviderError::Decode(_) => StatusCode::BAD_GATEWAY,

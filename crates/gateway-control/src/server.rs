@@ -63,12 +63,22 @@ fn bearer(headers: &HeaderMap) -> Option<&str> {
 async fn chat_completions<C: Clock + 'static>(
     State(state): State<Arc<AppState<C>>>,
     headers: HeaderMap,
-    Json(body): Json<WireChatRequest>,
+    raw: axum::body::Bytes,
 ) -> Response {
     let started = Instant::now();
+    // Authenticate BEFORE parsing the body — an unauthenticated request must get
+    // 401 regardless of Content-Type, and we never parse bodies for unauthorized
+    // callers (defense in depth).
     let key = match authenticate(state.keys.as_ref(), state.clock.as_ref(), bearer(&headers)) {
         Ok(k) => k,
         Err(e) => return e.into_response(),
+    };
+    let body: WireChatRequest = match serde_json::from_slice(&raw) {
+        Ok(b) => b,
+        Err(e) => {
+            return GatewayError::BadRequest(format!("invalid JSON request body: {e}"))
+                .into_response();
+        }
     };
     let req = body.to_unified();
 

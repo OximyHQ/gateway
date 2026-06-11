@@ -93,14 +93,38 @@ async fn run_up_async(args: UpArgs) -> anyhow::Result<()> {
         && !api_key.is_empty()
     {
         use gateway_llm::transports::openai::OpenAi;
+        let mut creds = Credentials::new(api_key);
+        // Optional base-URL override (Azure / self-hosted / OpenAI-compatible proxy).
+        if let Ok(base) = std::env::var("OPENAI_BASE_URL")
+            && !base.is_empty()
+        {
+            creds = creds.with_base_url(base);
+        }
         providers.insert(
             "openai",
             Deployment {
                 provider: Arc::new(OpenAi::new()),
-                credentials: Arc::new(Credentials::new(api_key)),
+                credentials: Arc::new(creds),
             },
         );
         tracing::info!("provider registered: openai");
+    }
+
+    // OpenRouter is OpenAI-compatible: reuse the OpenAI transport with its base URL.
+    if let Ok(api_key) = std::env::var("OPENROUTER_API_KEY")
+        && !api_key.is_empty()
+    {
+        use gateway_llm::transports::openai::OpenAi;
+        providers.insert(
+            "openrouter",
+            Deployment {
+                provider: Arc::new(OpenAi::new()),
+                credentials: Arc::new(
+                    Credentials::new(api_key).with_base_url("https://openrouter.ai/api"),
+                ),
+            },
+        );
+        tracing::info!("provider registered: openrouter (OpenAI-compatible)");
     }
 
     if let Ok(api_key) = std::env::var("ANTHROPIC_API_KEY")
@@ -134,11 +158,12 @@ async fn run_up_async(args: UpArgs) -> anyhow::Result<()> {
     if providers.get("openai").is_none()
         && providers.get("anthropic").is_none()
         && providers.get("gemini").is_none()
+        && providers.get("openrouter").is_none()
     {
         eprintln!(
             "  Warning: no provider API keys found (OPENAI_API_KEY, ANTHROPIC_API_KEY,\n\
-             \x20          GEMINI_API_KEY). The server will start but chat requests will\n\
-             \x20          fail until at least one key is set."
+             \x20          GEMINI_API_KEY, OPENROUTER_API_KEY). The server will start but\n\
+             \x20          chat requests will fail until at least one key is set."
         );
     }
 
@@ -217,6 +242,30 @@ async fn run_up_async(args: UpArgs) -> anyhow::Result<()> {
             supports_vision: true,
             supports_streaming: true,
         });
+        // OpenRouter (OpenAI-compatible) — current models reachable via one key.
+        for (id, input_per_mtok, output_per_mtok) in [
+            ("openai/gpt-4o-mini", 150_000_i64, 600_000_i64),
+            ("openai/gpt-4o", 2_500_000, 10_000_000),
+            ("anthropic/claude-3.5-haiku", 800_000, 4_000_000),
+            ("deepseek/deepseek-chat", 280_000, 880_000),
+            ("meta-llama/llama-3.3-70b-instruct", 120_000, 300_000),
+        ] {
+            reg.insert(ModelEntry {
+                id: id.into(),
+                provider: "openrouter".into(),
+                price: ModelPrice {
+                    input_per_mtok,
+                    output_per_mtok,
+                    cache_read_per_mtok: 0,
+                    cache_write_per_mtok: 0,
+                },
+                context_window: Some(128_000),
+                max_output_tokens: Some(8_192),
+                supports_tools: true,
+                supports_vision: false,
+                supports_streaming: true,
+            });
+        }
     }
 
     // Set unlimited budget for the admin key.
