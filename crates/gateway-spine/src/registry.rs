@@ -51,6 +51,13 @@ impl ModelRegistry {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+
+    /// Sorted list of all registered model ids (for `/v1/models` + catalog UI).
+    pub fn ids(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.entries.keys().cloned().collect();
+        v.sort();
+        v
+    }
 }
 
 #[cfg(test)]
@@ -104,5 +111,15 @@ mod tests {
         assert!(r.get("gpt-4o").unwrap().supports_tools);
         assert_eq!(r.get("gpt-4o").unwrap().context_window, Some(128_000));
         assert!(r.get("nope").is_none());
+    }
+
+    #[test]
+    fn ids_are_sorted() {
+        let mut r = ModelRegistry::new();
+        let mut e2 = entry();
+        e2.id = "zeta".into();
+        r.insert(e2);
+        r.insert(entry()); // "gpt-4o"
+        assert_eq!(r.ids(), vec!["gpt-4o".to_string(), "zeta".to_string()]);
     }
 }

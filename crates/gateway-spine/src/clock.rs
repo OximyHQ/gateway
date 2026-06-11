@@ -43,6 +43,12 @@ impl Clock for MockClock {
     }
 }
 
+impl<C: Clock> Clock for std::sync::Arc<C> {
+    fn now_ms(&self) -> i64 {
+        (**self).now_ms()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
