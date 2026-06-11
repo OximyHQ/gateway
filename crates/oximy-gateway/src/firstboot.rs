@@ -25,7 +25,8 @@ pub struct MintedKey {
 }
 
 /// A cryptographically random admin secret with the `sk-oximy-` prefix.
-fn generate_secret() -> String {
+/// Pub so the `keys create` CLI command can mint new secrets with the same format.
+pub fn generate_secret() -> String {
     use rand::Rng;
     let mut rng = rand::thread_rng();
     // 40 bytes of base62 entropy.

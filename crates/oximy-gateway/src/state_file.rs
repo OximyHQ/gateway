@@ -110,3 +110,16 @@ impl crate::firstboot::KeyStore for StateFile {
         Ok(self.data.lock().unwrap().keys.len())
     }
 }
+
+impl StateFile {
+    /// Mark a key as revoked by id. Returns an error if the id is not found.
+    pub fn revoke_key(&self, id: &str) -> anyhow::Result<()> {
+        let mut data = self.data.lock().unwrap();
+        let key = data
+            .keys
+            .get_mut(id)
+            .ok_or_else(|| anyhow::anyhow!("key '{id}' not found"))?;
+        key.revoked = true;
+        Ok(())
+    }
+}

@@ -28,6 +28,8 @@ pub enum Command {
     Up(UpArgs),
     /// Print the version.
     Version,
+    /// Manage virtual API keys.
+    Keys(KeysArgs),
 }
 
 #[derive(Debug, clap::Args, Clone)]
@@ -47,6 +49,44 @@ pub struct UpArgs {
     /// Confirm an admin key exists (never re-reveals the secret).
     #[arg(long)]
     pub print_key: bool,
+}
+
+/// `oximy-gateway keys <subcommand>` — manage virtual API keys offline (without
+/// a running server). All operations work against the same state file the server
+/// uses, so a key minted here is valid against a running server using the same
+/// data dir.
+#[derive(Debug, clap::Args)]
+pub struct KeysArgs {
+    /// Data directory (must match the running server's --dir).
+    #[arg(long)]
+    pub dir: Option<PathBuf>,
+
+    #[command(subcommand)]
+    pub subcommand: KeysCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum KeysCommand {
+    /// Mint a new virtual key. The secret is printed once and NOT stored.
+    Create {
+        /// Human-readable name (used as part of the key id).
+        #[arg(long)]
+        name: Option<String>,
+        /// Spending budget in USD (e.g. 5.0). Omit for unlimited.
+        #[arg(long)]
+        budget_usd: Option<f64>,
+        /// Comma-separated model allowlist (e.g. gpt-4o,claude-3-5-sonnet-20241022).
+        /// Omit to allow all models.
+        #[arg(long)]
+        models: Option<String>,
+    },
+    /// List all keys in the store (ids, prefixes, budget, revoked status).
+    List,
+    /// Revoke a key by id. Revoked keys are rejected by the server on next restart.
+    Revoke {
+        /// The key id to revoke (from `keys list`).
+        id: String,
+    },
 }
 
 /// Resolve the data directory: `--dir` > `$OXIMY_GATEWAY_DIR` > platform default.
@@ -120,6 +160,60 @@ mod tests {
                 assert!(args.no_open);
             }
             _ => panic!("expected up"),
+        }
+    }
+
+    #[test]
+    fn keys_create_parses() {
+        let cli = Cli::parse_from([
+            "oximy-gateway",
+            "keys",
+            "create",
+            "--name",
+            "test",
+            "--budget-usd",
+            "5.0",
+            "--models",
+            "gpt-4o,claude-3-5-sonnet-20241022",
+        ]);
+        match cli.command {
+            Command::Keys(args) => match args.subcommand {
+                KeysCommand::Create {
+                    name,
+                    budget_usd,
+                    models,
+                } => {
+                    assert_eq!(name.as_deref(), Some("test"));
+                    assert!((budget_usd.unwrap() - 5.0).abs() < 1e-9);
+                    assert_eq!(models.as_deref(), Some("gpt-4o,claude-3-5-sonnet-20241022"));
+                }
+                _ => panic!("expected create"),
+            },
+            _ => panic!("expected keys"),
+        }
+    }
+
+    #[test]
+    fn keys_list_parses() {
+        let cli = Cli::parse_from(["oximy-gateway", "keys", "list"]);
+        assert!(matches!(
+            cli.command,
+            Command::Keys(KeysArgs {
+                subcommand: KeysCommand::List,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn keys_revoke_parses() {
+        let cli = Cli::parse_from(["oximy-gateway", "keys", "revoke", "key_admin_123"]);
+        match cli.command {
+            Command::Keys(args) => match args.subcommand {
+                KeysCommand::Revoke { id } => assert_eq!(id, "key_admin_123"),
+                _ => panic!("expected revoke"),
+            },
+            _ => panic!("expected keys"),
         }
     }
 }
