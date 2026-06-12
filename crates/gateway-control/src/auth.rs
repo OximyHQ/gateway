@@ -94,6 +94,7 @@ mod tests {
             max_budget: None,
             limits: gateway_spine::RateLimits::default(),
             model_allowlist: None,
+            tool_allowlist: None,
             expires_at: None,
             revoked: true,
             parent_id: None,

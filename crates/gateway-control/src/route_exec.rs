@@ -145,7 +145,7 @@ mod tests {
     #[tokio::test]
     async fn dispatches_to_registry_provider_with_target_model() {
         let provider = Arc::new(RecordingProvider::new());
-        let mut reg = ProviderRegistry::new();
+        let reg = ProviderRegistry::new();
         reg.insert(
             "openai",
             Deployment {

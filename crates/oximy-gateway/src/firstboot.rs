@@ -56,6 +56,7 @@ pub fn ensure_admin_key(
         max_budget: None, // admin: unlimited
         limits: RateLimits::default(),
         model_allowlist: None, // admin: all models
+        tool_allowlist: None,  // admin: all tools
         expires_at: None,
         revoked: false,
         parent_id: None,

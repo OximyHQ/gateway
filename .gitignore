@@ -27,3 +27,10 @@
 crates/gateway-dash/web/node_modules
 crates/gateway-dash/web/dist
 .gstack/
+
+# Local provider keys (testing)
+.env.local
+.env*
+
+# Local gateway state (testing)
+.oximy-data/

@@ -616,11 +616,12 @@ mod tests {
             max_budget: Some(Usd::from_dollars_f64(10.0)),
             limits: RateLimits::default(),
             model_allowlist: None,
+            tool_allowlist: None,
             expires_at: None,
             revoked: false,
             parent_id: None,
         });
-        let mut providers = ProviderRegistry::new();
+        let providers = ProviderRegistry::new();
         providers.insert(
             "openai",
             Deployment {
@@ -655,11 +656,12 @@ mod tests {
             max_budget: Some(Usd::from_dollars_f64(100.0)),
             limits: RateLimits::default(),
             model_allowlist: None,
+            tool_allowlist: None,
             expires_at: None,
             revoked: false,
             parent_id: None,
         });
-        let mut providers = ProviderRegistry::new();
+        let providers = ProviderRegistry::new();
         providers.insert(
             "openai",
             Deployment {
@@ -917,11 +919,12 @@ mod tests {
             max_budget: Some(Usd::from_dollars_f64(10.0)),
             limits: RateLimits::default(),
             model_allowlist: None,
+            tool_allowlist: None,
             expires_at: None,
             revoked: false,
             parent_id: None,
         });
-        let mut providers = ProviderRegistry::new();
+        let providers = ProviderRegistry::new();
         providers.insert(
             "openai",
             Deployment {

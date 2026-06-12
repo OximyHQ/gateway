@@ -27,6 +27,10 @@ pub struct VirtualKey {
     pub limits: RateLimits,
     /// `None` = all models allowed.
     pub model_allowlist: Option<Vec<String>>,
+    /// Namespaced MCP tool allowlist (`server__tool`). `None` = all tools allowed.
+    /// Carried on the key so the federation ACL can be re-seeded after a restart.
+    #[serde(default)]
+    pub tool_allowlist: Option<Vec<String>>,
     /// Unix epoch millis; `None` = never expires.
     pub expires_at: Option<i64>,
     pub revoked: bool,
@@ -82,6 +86,7 @@ mod tests {
             max_budget: Some(Usd::from_dollars_f64(10.0)),
             limits: RateLimits::default(),
             model_allowlist: None,
+            tool_allowlist: None,
             expires_at: None,
             revoked: false,
             parent_id: None,

@@ -48,6 +48,7 @@ fn full_admission_and_commit_path() {
             max_parallel: Some(4),
         },
         model_allowlist: Some(vec!["gpt-4o".into()]),
+        tool_allowlist: None,
         expires_at: None,
         revoked: false,
         parent_id: None,

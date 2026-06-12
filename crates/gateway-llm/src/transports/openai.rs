@@ -10,11 +10,11 @@ use async_trait::async_trait;
 use gateway_spine::TokenUsage;
 use serde::{Deserialize, Serialize};
 
-use crate::message::{ContentPart, Message, Role};
+use crate::message::{ContentPart, ImageSource, Message, Role};
 use crate::provider::{Credentials, DeltaStream, Provider, ProviderCapabilities, ProviderError};
 use crate::req::ChatRequest;
 use crate::resp::{ChatResponse, FinishReason};
-use crate::toolcall::ToolCall;
+use crate::toolcall::{ToolCall, ToolChoice, ToolDef};
 
 const DEFAULT_BASE_URL: &str = "https://api.openai.com";
 
@@ -46,6 +46,10 @@ impl OpenAi {
 struct WireRequest<'a> {
     model: &'a str,
     messages: Vec<WireMessage>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tools: Vec<WireReqToolDef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -64,7 +68,43 @@ struct WireStreamOptions {
 #[derive(Serialize)]
 struct WireMessage {
     role: &'static str,
-    content: String,
+    /// String for text-only, array of typed parts for multimodal, or omitted for an
+    /// assistant turn carrying only tool calls.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tool_calls: Vec<WireReqCall>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_call_id: Option<String>,
+}
+
+#[derive(Serialize)]
+struct WireReqToolDef {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    function: WireReqToolFn,
+}
+
+#[derive(Serialize)]
+struct WireReqToolFn {
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    parameters: serde_json::Value,
+}
+
+#[derive(Serialize)]
+struct WireReqCall {
+    id: String,
+    #[serde(rename = "type")]
+    kind: &'static str,
+    function: WireReqCallFn,
+}
+
+#[derive(Serialize)]
+struct WireReqCallFn {
+    name: String,
+    arguments: String,
 }
 
 #[derive(Deserialize)]
@@ -172,14 +212,86 @@ fn role_str(role: Role) -> &'static str {
     }
 }
 
+/// Build the OpenAI `content` value: a bare string for text-only messages, an array
+/// of typed parts when an image is present, or `None` for an assistant turn that
+/// carried only tool calls.
+fn content_json(m: &Message) -> Option<serde_json::Value> {
+    let has_image = m
+        .content
+        .iter()
+        .any(|p| matches!(p, ContentPart::Image { .. }));
+    if !has_image {
+        let text = m.text_content();
+        if text.is_empty() && !m.tool_calls.is_empty() {
+            return None;
+        }
+        return Some(serde_json::Value::String(text));
+    }
+    let parts: Vec<serde_json::Value> = m
+        .content
+        .iter()
+        .map(|p| match p {
+            ContentPart::Text { text } => serde_json::json!({"type": "text", "text": text}),
+            ContentPart::Image { source } => {
+                let url = match source {
+                    ImageSource::Url { url } => url.clone(),
+                    ImageSource::Base64 { media_type, data } => {
+                        format!("data:{media_type};base64,{data}")
+                    }
+                };
+                serde_json::json!({"type": "image_url", "image_url": {"url": url}})
+            }
+        })
+        .collect();
+    Some(serde_json::Value::Array(parts))
+}
+
 fn map_messages(messages: &[Message]) -> Vec<WireMessage> {
     messages
         .iter()
         .map(|m| WireMessage {
             role: role_str(m.role),
-            content: m.text_content(),
+            content: content_json(m),
+            tool_calls: m
+                .tool_calls
+                .iter()
+                .map(|t| WireReqCall {
+                    id: t.id.clone(),
+                    kind: "function",
+                    function: WireReqCallFn {
+                        name: t.name.clone(),
+                        arguments: t.arguments.clone(),
+                    },
+                })
+                .collect(),
+            tool_call_id: m.tool_call_id.clone(),
         })
         .collect()
+}
+
+fn map_tools(tools: &[ToolDef]) -> Vec<WireReqToolDef> {
+    tools
+        .iter()
+        .map(|t| WireReqToolDef {
+            kind: "function",
+            function: WireReqToolFn {
+                name: t.name.clone(),
+                description: t.description.clone(),
+                parameters: t.parameters.clone(),
+            },
+        })
+        .collect()
+}
+
+fn map_tool_choice(tc: Option<&ToolChoice>) -> Option<serde_json::Value> {
+    tc.map(|c| match c {
+        ToolChoice::Auto => serde_json::Value::String("auto".into()),
+        ToolChoice::None => serde_json::Value::String("none".into()),
+        ToolChoice::Required => serde_json::Value::String("required".into()),
+        ToolChoice::Function { name } => {
+            serde_json::json!({"type": "function", "function": {"name": name}})
+        }
+    })
 }
 
 fn map_finish(reason: Option<&str>) -> FinishReason {
@@ -308,6 +420,8 @@ impl Provider for OpenAi {
         let wire = WireRequest {
             model: &req.model,
             messages: map_messages(&req.messages),
+            tools: map_tools(&req.tools),
+            tool_choice: map_tool_choice(req.tool_choice.as_ref()),
             temperature: req.temperature,
             max_tokens: req.max_tokens,
             stream: false,
@@ -367,6 +481,8 @@ impl Provider for OpenAi {
         let wire = WireRequest {
             model: &req.model,
             messages: map_messages(&req.messages),
+            tools: map_tools(&req.tools),
+            tool_choice: map_tool_choice(req.tool_choice.as_ref()),
             temperature: req.temperature,
             max_tokens: req.max_tokens,
             stream: true,

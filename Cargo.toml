@@ -41,6 +41,7 @@ futures = "0.3"
 tokio-stream = "0.1"
 async-trait = "0.1"
 bytes = "1"
+base64 = "0.22"
 wiremock = "0.6"
 axum = { version = "0.8", features = ["json", "tokio", "http2"] }
 tower = { version = "0.5", features = ["util"] }
