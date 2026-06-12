@@ -245,7 +245,7 @@ impl Gateway {
                 })
             })?
         };
-        if state.providers.get(&provider_id).is_none() {
+        if !state.providers.contains(&provider_id) {
             return Err(GatewayError::BadRequest(format!(
                 "no egress configured for provider {provider_id}"
             )));

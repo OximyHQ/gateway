@@ -16,6 +16,18 @@ pub struct Deployment {
     pub credentials: Arc<Credentials>,
 }
 
+impl Deployment {
+    /// Build an OpenAI-compatible deployment: the `OpenAi` transport pointed at
+    /// `base_url` with `api_key`. Shared by the env presets, the runtime provider
+    /// admin API (create/update), and state-file re-registration at boot.
+    pub fn openai_compat(api_key: impl Into<String>, base_url: impl Into<String>) -> Self {
+        Deployment {
+            provider: Arc::new(gateway_llm::transports::openai::OpenAi::new()),
+            credentials: Arc::new(Credentials::new(api_key).with_base_url(base_url)),
+        }
+    }
+}
+
 /// Maps provider ids to their live egress deployment. Uses interior mutability
 /// (`RwLock`) so the registry can be mutated at runtime (e.g. the admin
 /// `POST /v1/admin/providers` route) while every reader keeps an `&self`
@@ -66,6 +78,13 @@ impl ProviderRegistry {
     /// via interior mutability so the admin `DELETE` route can call it at runtime.
     pub fn remove(&self, provider_id: &str) -> bool {
         self.by_id.write().unwrap().remove(provider_id).is_some()
+    }
+
+    /// Whether a deployment is registered for `provider_id`, without cloning it —
+    /// cheaper than `get(..).is_some()` for a pre-flight existence check on the
+    /// dispatch hot path.
+    pub fn contains(&self, provider_id: &str) -> bool {
+        self.by_id.read().unwrap().contains_key(provider_id)
     }
 }
 

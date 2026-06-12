@@ -257,12 +257,7 @@ async fn run_up_async(args: UpArgs) -> anyhow::Result<()> {
     for sp in sf.load_providers() {
         providers.insert(
             sp.id.clone(),
-            Deployment {
-                provider: Arc::new(OpenAi::new()),
-                credentials: Arc::new(
-                    Credentials::new(sp.api_key.clone()).with_base_url(sp.base_url.clone()),
-                ),
-            },
+            Deployment::openai_compat(sp.api_key.clone(), sp.base_url.clone()),
         );
         tracing::info!(provider_id = %sp.id, base_url = %sp.base_url, "provider re-registered from state file");
     }
@@ -540,19 +535,11 @@ fn register_compat_provider(
     base_url: &'static str,
 ) {
     use gateway_control::providers::Deployment;
-    use gateway_llm::Credentials;
-    use gateway_llm::transports::openai::OpenAi;
 
     if let Ok(api_key) = std::env::var(env_key)
         && !api_key.is_empty()
     {
-        providers.insert(
-            provider_id,
-            Deployment {
-                provider: Arc::new(OpenAi::new()),
-                credentials: Arc::new(Credentials::new(api_key).with_base_url(base_url)),
-            },
-        );
+        providers.insert(provider_id, Deployment::openai_compat(api_key, base_url));
         tracing::info!(
             provider_id,
             base_url,

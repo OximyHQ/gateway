@@ -567,17 +567,22 @@ async fn providers<C: Clock + 'static>(
         Err(e) => return e.into_response(),
     }
 
-    let reg = state.registry.read().unwrap();
+    // One pass over the catalog → provider→model-count map, instead of re-scanning
+    // every model once per provider (was O(providers × models)).
+    let counts: std::collections::HashMap<String, u64> = {
+        let reg = state.registry.read().unwrap();
+        let mut m: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+        for e in reg.all_entries() {
+            *m.entry(e.provider).or_insert(0) += 1;
+        }
+        m
+    };
     let all_providers: Vec<ProviderInfo> = state
         .providers
         .all_ids()
         .into_iter()
         .map(|id| {
-            let models_count = reg
-                .ids()
-                .into_iter()
-                .filter(|mid| reg.get(mid).is_some_and(|e| e.provider == id))
-                .count() as u64;
+            let models_count = counts.get(&id).copied().unwrap_or(0);
             let base_url = state
                 .providers
                 .get(&id)
@@ -628,27 +633,16 @@ async fn create_provider<C: Clock + 'static>(
     // model (a typo like "Tets", or an arbitrary name) would register as "active"
     // yet never serve a request. Reject it with guidance instead of creating a
     // dead provider.
-    let matched = {
+    // Single pass: the set of distinct provider ids that actually appear in the
+    // catalog. The id must be one of them, else it would register as "active" yet
+    // never serve a request (a typo like "Tets"). The same set supplies the error
+    // examples, so no second scan is needed.
+    let known: std::collections::BTreeSet<String> = {
         let reg = state.registry.read().unwrap();
-        reg.ids()
-            .into_iter()
-            .filter(|mid| reg.get(mid).is_some_and(|e| e.provider == id))
-            .count()
+        reg.all_entries().into_iter().map(|e| e.provider).collect()
     };
-    if matched == 0 {
-        let mut sample: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-        {
-            let reg = state.registry.read().unwrap();
-            for mid in reg.ids() {
-                if let Some(e) = reg.get(&mid) {
-                    sample.insert(e.provider.clone());
-                }
-                if sample.len() >= 6 {
-                    break;
-                }
-            }
-        }
-        let examples = sample.into_iter().collect::<Vec<_>>().join(", ");
+    if !known.contains(&id) {
+        let examples = known.iter().take(6).cloned().collect::<Vec<_>>().join(", ");
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error":{
@@ -661,14 +655,8 @@ async fn create_provider<C: Clock + 'static>(
 
     // Build an OpenAI-compatible deployment (transport + base_url + api_key),
     // exactly as the env-var presets do at boot.
-    use gateway_llm::Credentials;
-    use gateway_llm::transports::openai::OpenAi;
-    let deployment = crate::providers::Deployment {
-        provider: Arc::new(OpenAi::new()),
-        credentials: Arc::new(
-            Credentials::new(body.api_key.clone()).with_base_url(base_url.clone()),
-        ),
-    };
+    let deployment =
+        crate::providers::Deployment::openai_compat(body.api_key.clone(), base_url.clone());
 
     // Register at runtime (interior mutability — no &mut needed).
     state.providers.insert(id.clone(), deployment);
@@ -730,14 +718,8 @@ async fn update_provider<C: Clock + 'static>(
             .into_response();
     }
 
-    use gateway_llm::Credentials;
-    use gateway_llm::transports::openai::OpenAi;
-    let deployment = crate::providers::Deployment {
-        provider: Arc::new(OpenAi::new()),
-        credentials: Arc::new(
-            Credentials::new(body.api_key.clone()).with_base_url(base_url.clone()),
-        ),
-    };
+    let deployment =
+        crate::providers::Deployment::openai_compat(body.api_key.clone(), base_url.clone());
     state.providers.insert(id.clone(), deployment);
 
     if let Some(persist) = &state.provider_persist {
