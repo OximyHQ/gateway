@@ -1,0 +1,25 @@
+# cargo-audit configuration.
+# https://github.com/rustsec/rustsec/tree/main/cargo-audit
+#
+# `cargo audit` flags advisories for every crate present in Cargo.lock,
+# regardless of whether that crate is actually compiled into our binary.
+# cargo-deny (see ../deny.toml) does real feature-graph analysis and does NOT
+# flag the entry below — this ignore exists only to keep the naive lockfile
+# scan in sync with reality.
+
+[advisories]
+ignore = [
+    # RUSTSEC-2023-0071 — Marvin Attack: timing sidechannel in the `rsa` crate.
+    #
+    # `rsa` enters Cargo.lock solely as an OPTIONAL dependency of `sqlx-mysql`,
+    # which is itself an optional dependency of the `sqlx` umbrella crate. We
+    # never enable sqlx's `mysql` feature (gateway-config: sqlite; gateway-store:
+    # sqlite + postgres), so `sqlx-mysql` and `rsa` are never compiled into
+    # oximy-gateway. `cargo tree -i rsa` returns nothing, confirming the crate is
+    # not in the build graph. The gateway therefore never performs RSA operations
+    # and is not exposed to this timing sidechannel.
+    #
+    # Revisit if we ever add a MySQL backend (which would pull `rsa` into the
+    # build): at that point upgrade to a patched `rsa` release instead of ignoring.
+    "RUSTSEC-2023-0071",
+]
