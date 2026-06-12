@@ -47,7 +47,7 @@ body{
 a{color:inherit;text-decoration:none}
 .mono{font-family:var(--mono)}
 .dim{color:var(--dim)} .faint{color:var(--faint)}
-.num{font-variant-numeric:tabular-nums;letter-spacing:-.01em}
+.num{font-family:var(--mono);font-variant-numeric:tabular-nums;letter-spacing:-.01em}
 
 #app{display:grid;grid-template-columns:var(--sb) 1fr;min-height:100vh}
 #side{position:sticky;top:0;height:100vh;border-right:1px solid var(--line);
@@ -72,7 +72,7 @@ nav{padding:8px 12px;flex:1;overflow-y:auto}
 #main{min-width:0;display:flex;flex-direction:column}
 header{position:sticky;top:0;z-index:4;display:flex;align-items:center;gap:14px;
   padding:0 26px;height:62px;border-bottom:1px solid var(--line);background:rgba(255,250,248,.82);backdrop-filter:blur(14px)}
-header h1{font-size:17px;font-weight:600;letter-spacing:-.01em}
+header h1{font-family:var(--display);font-size:18px;font-weight:600;letter-spacing:0}
 header h1 .sub{color:var(--faint);font-weight:400;font-size:13px;margin-left:9px}
 .hspace{flex:1}
 .hstat{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--dim);padding:6px 12px;border:1px solid var(--line2);border-radius:20px;background:var(--card);box-shadow:var(--sh-sm)}
@@ -85,7 +85,7 @@ header h1 .sub{color:var(--faint);font-weight:400;font-size:13px;margin-left:9px
 
 .row{display:flex;align-items:center;gap:12px}
 .pagehd{display:flex;align-items:flex-end;gap:14px;margin-bottom:22px}
-.pagehd h2{font-size:23px;font-weight:600;letter-spacing:-.02em}
+.pagehd h2{font-family:var(--display);font-size:24px;font-weight:600;letter-spacing:0}
 .pagehd p{color:var(--dim);font-size:13px;margin-bottom:3px}
 
 .grid{display:grid;gap:14px}
@@ -96,14 +96,14 @@ header h1 .sub{color:var(--faint);font-weight:400;font-size:13px;margin-left:9px
 .card.glow::after{content:"";position:absolute;top:-50%;right:-15%;width:200px;height:200px;border-radius:50%;background:radial-gradient(circle,rgba(255,77,0,.07),transparent 70%);pointer-events:none}
 .stat .k{font-family:var(--mono);font-size:11px;letter-spacing:.13em;text-transform:uppercase;color:var(--faint);display:flex;align-items:center;gap:7px}
 .stat{padding:16px}
-.stat .v{font-size:clamp(15px,1.5vw,23px);font-weight:600;letter-spacing:-.02em;margin-top:11px;line-height:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-variant-numeric:tabular-nums}
+.stat .v{font-family:var(--display);font-size:clamp(16px,1.5vw,24px);font-weight:600;letter-spacing:0;margin-top:11px;line-height:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-variant-numeric:tabular-nums}
 .stat .ic{width:15px;height:15px;stroke:var(--acc);fill:none;stroke-width:1.8}
 .chip{display:inline-flex;align-items:center;gap:6px;font-family:var(--mono);font-size:12px;padding:2px 9px;border-radius:20px;border:1px solid var(--line2);color:var(--dim);background:var(--bg1);white-space:nowrap}
 .chip.ok{color:var(--ok);border-color:rgba(22,163,74,.25);background:var(--ok-bg)}
 .chip.warn{color:var(--warn);border-color:rgba(217,119,6,.25);background:var(--warn-bg)}
 .chip.bad{color:var(--err);border-color:rgba(220,38,38,.25);background:var(--err-bg)}
 .chip.v{color:var(--violet);border-color:rgba(157,111,147,.28);background:var(--violet-bg)}
-h3.sec{font-size:13px;font-weight:600;color:var(--tx);margin-bottom:14px;display:flex;align-items:center;gap:10px}
+h3.sec{font-family:var(--display);font-size:14px;font-weight:600;color:var(--tx);margin-bottom:14px;display:flex;align-items:center;gap:10px}
 h3.sec::after{content:"";flex:1;height:1px;background:linear-gradient(90deg,var(--line2),transparent)}
 
 .tbl{width:100%;border-collapse:collapse;font-size:13px}
@@ -146,7 +146,7 @@ label{font-family:var(--mono);font-size:12px;letter-spacing:.06em;text-transform
 .scrim{position:fixed;inset:0;background:rgba(60,24,0,.28);backdrop-filter:blur(5px);z-index:50;display:none;align-items:center;justify-content:center;padding:24px}
 .scrim.on{display:flex}
 .modal{width:100%;max-width:440px;background:var(--card);border:1px solid var(--line2);border-radius:18px;padding:26px;box-shadow:var(--sh-md);animation:rise .3s both var(--ease)}
-.modal h3{font-size:18px;font-weight:600;margin-bottom:5px}
+.modal h3{font-family:var(--display);font-size:18px;font-weight:600;margin-bottom:5px}
 .modal .mdsc{color:var(--dim);font-size:13px;margin-bottom:20px}
 .modal .acts{display:flex;gap:10px;justify-content:flex-end;margin-top:22px}
 .gate .logo{width:48px;height:48px;margin:0 auto 18px}
