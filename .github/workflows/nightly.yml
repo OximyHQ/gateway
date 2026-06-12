@@ -70,3 +70,7 @@ jobs:
       - uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          # RUSTSEC-2023-0071: `rsa` is an optional, never-compiled transitive of
+          # sqlx-mysql (mysql feature is off). See .cargo/audit.toml for the full
+          # justification. cargo-deny already gates the real build graph.
+          ignore: RUSTSEC-2023-0071
