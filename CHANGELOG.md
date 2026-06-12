@@ -48,3 +48,9 @@ All notable changes to Oximy Gateway are documented here. The format follows
 - **Verified end-to-end against real LLMs** via OpenRouter (gpt-4o-mini,
   claude-3.5-haiku, deepseek-chat, llama-3.3-70b): real completions + streaming,
   exact integer-µUSD cost tracking, and auth/budget/model governance enforced.
+
+### Changed
+- Dashboard reskin: real Oximy pixel monogram + favicon, PPMondwest display
+  headings/headline numbers with monospace tabular figures, shadcn new-york
+  shape (squared badges, tighter radii), dashboard-aligned greys/status/shadows
+  and focus ring. Light-only; no API/behavior changes.
