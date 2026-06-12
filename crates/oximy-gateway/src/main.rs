@@ -394,6 +394,16 @@ async fn run_up_async(args: UpArgs) -> anyhow::Result<()> {
         register_mcp_servers(&state, &raw).await;
     }
 
+    // ── 6e2. Re-seed per-key MCP tool ACLs from persisted keys ───────────────
+    // The federation ACL is in-memory; rebuild it from each key's persisted
+    // tool_allowlist so a restart can't silently re-open a restricted key.
+    for key in sf.load_keys() {
+        if let Some(allow) = &key.tool_allowlist {
+            let set: std::collections::HashSet<String> = allow.iter().cloned().collect();
+            state.federation.acl_mut().await.set(&key.id, Some(set));
+        }
+    }
+
     // ── 6f. Spawn background reservation sweep ───────────────────────────────
     // Sweeps stale (crashed/orphaned) reservations every 60s so they don't
     // block future budget reservations indefinitely.
@@ -726,6 +736,7 @@ async fn run_keys_async(args: cli::KeysArgs) -> anyhow::Result<()> {
                 max_budget,
                 limits: RateLimits::default(),
                 model_allowlist,
+                tool_allowlist: None,
                 expires_at: None,
                 revoked: false,
                 parent_id: None,

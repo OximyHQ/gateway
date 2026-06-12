@@ -776,6 +776,7 @@ mod tests {
             max_budget: budget,
             limits,
             model_allowlist: allow,
+            tool_allowlist: None,
             expires_at: None,
             revoked: false,
             parent_id: None,
