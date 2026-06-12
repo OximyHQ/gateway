@@ -140,6 +140,24 @@ label{font-family:var(--mono);font-size:12px;letter-spacing:.06em;text-transform
 .searchbox{position:relative;max-width:340px}
 .searchbox svg{position:absolute;left:11px;top:50%;transform:translateY(-50%);width:15px;height:15px;stroke:var(--faint);fill:none;stroke-width:1.8}
 .searchbox input{padding-left:34px}
+.btn.danger.fill{background:var(--err);color:#fff;border-color:transparent}
+.btn.danger.fill:hover{background:#dc2626}
+.dd{position:relative}
+.dd-trigger{display:flex;align-items:center;gap:8px;width:100%;font-family:var(--mono);font-size:13px;color:var(--tx);background:var(--card);border:1px solid var(--line2);border-radius:4px;padding:9px 12px;cursor:pointer;text-align:left;transition:.14s}
+.dd-trigger:hover{border-color:var(--line3)}
+.dd-val{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dd-caret{width:15px;height:15px;stroke:var(--faint);fill:none;stroke-width:2;flex:0 0 auto}
+.dd-pop{position:absolute;z-index:30;top:calc(100% + 5px);left:0;right:0;display:flex;flex-direction:column;max-height:316px;background:var(--card);border:1px solid var(--line2);border-radius:8px;box-shadow:var(--sh-md);overflow:hidden;animation:rise .16s both var(--ease)}
+.dd-pop[hidden]{display:none}
+.dd-search{display:flex;align-items:center;gap:8px;padding:9px 12px;border-bottom:1px solid var(--line)}
+.dd-search svg{width:14px;height:14px;stroke:var(--faint);fill:none;stroke-width:1.8;flex:0 0 auto}
+.dd-search input{border:0;padding:0;background:transparent;font-family:var(--sans)}
+.dd-search input:focus{box-shadow:none}
+.dd-list{overflow-y:auto;padding:5px}
+.dd-opt{padding:7px 10px;border-radius:4px;font-family:var(--mono);font-size:12.5px;color:var(--dim);cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dd-opt:hover{background:var(--bg2);color:var(--tx)}
+.dd-opt.on{background:var(--acc-bg);color:var(--acc)}
+.dd-empty{padding:16px;text-align:center;color:var(--faint);font-size:12.5px}
 
 .scrim{position:fixed;inset:0;background:rgba(0,0,0,.28);backdrop-filter:blur(5px);z-index:50;display:none;align-items:center;justify-content:center;padding:24px}
 .scrim.on{display:flex}
@@ -339,7 +357,7 @@ function keyModal(){
     }catch(e){toast('Create failed: '+e.msg,'err');}
   };
 }
-async function revokeKey(id){if(!confirm('Revoke this key? Requests with it will immediately fail.'))return;
+async function revokeKey(id){if(!await confirmModal({title:'Revoke key',body:'Requests using this key will immediately fail. This cannot be undone.',confirmLabel:'Revoke',danger:true}))return;
   try{await api('/v1/admin/keys/'+id+'/revoke',{method:'POST'});toast('Key revoked','warn');go('keys');}catch(e){toast('Revoke failed: '+e.msg,'err');}}
 
 let logTimer=null;
@@ -407,19 +425,20 @@ VIEWS.guardrails={title:'Guardrails',sub:'policy',async render(){
 VIEWS.playground={title:'Playground',sub:'',async render(){
   let models=[];try{models=(await api('/v1/models')).body.data||[];}catch(e){return gateOrErr(e);}
   const pop=['openai/gpt-4o-mini','openai/gpt-4o','anthropic/claude-3.5-haiku','deepseek/deepseek-chat'].filter(id=>models.some(m=>m.id===id));
-  const opts=[...new Set([...pop,...models.map(m=>m.id)])].slice(0,400).map(id=>`<option>${fmt.esc(id)}</option>`).join('');
+  const modelList=[...new Set([...pop,...models.map(m=>m.id)])];
   $('#content').innerHTML=`<div class="pagehd"><div><h2>Playground</h2><p>Send a chat completion through the gateway.</p></div></div>
     <div class="grid g2"><div class="card">
-      <div class="field"><label>Model</label><select id="pg-model">${opts}</select></div>
+      <div class="field"><label>Model</label><div id="pg-modeldd"></div></div>
       <div class="field"><label>System (optional)</label><textarea id="pg-sys" style="min-height:54px" placeholder="You are a helpful assistant."></textarea></div>
       <div class="field"><label>Message</label><textarea id="pg-msg" placeholder="Ask anything…">Say hello in five words.</textarea></div>
       <button class="btn pri" id="pg-send" style="width:100%"><svg viewBox="0 0 24 24">${ICONS.play}</svg>Send request</button>
     </div><div class="card"><h3 class="sec">Response</h3><div id="pg-out" class="dim" style="font-size:13.5px;white-space:pre-wrap;line-height:1.6">—</div><div id="pg-meta" class="row" style="margin-top:14px;gap:8px;flex-wrap:wrap"></div></div></div>`;
+  const modelDD=dropdown($('#pg-modeldd'),modelList,modelList[0]);
   $('#pg-send').onclick=async()=>{
     const out=$('#pg-out'),meta=$('#pg-meta');out.innerHTML='<span class="skeleton">generating…</span>';meta.innerHTML='';
     const msgs=[];if($('#pg-sys').value.trim())msgs.push({role:'system',content:$('#pg-sys').value});msgs.push({role:'user',content:$('#pg-msg').value});
     const t0=performance.now();
-    try{const r=await api('/v1/chat/completions',{method:'POST',body:JSON.stringify({model:$('#pg-model').value,messages:msgs})});
+    try{const r=await api('/v1/chat/completions',{method:'POST',body:JSON.stringify({model:modelDD.value,messages:msgs})});
       const d=r.body;out.textContent=d.choices?.[0]?.message?.content||'(empty)';
       const cost=d.usage?.cost,ov=r.headers.get('x-overhead-duration-ms'),served=r.headers.get('x-served-by');
       meta.innerHTML=`<span class="chip ok">${fmt.usd(cost)}</span><span class="chip">${d.usage?.total_tokens||0} tok</span><span class="chip">${Math.round(performance.now()-t0)}ms total</span>${ov?`<span class="chip">${ov}ms overhead</span>`:''}${served?`<span class="chip v">${fmt.esc(served)}</span>`:''}`;
@@ -430,6 +449,28 @@ VIEWS.playground={title:'Playground',sub:'',async render(){
 function gateOrErr(e){if(e.status===401){openKeyGate();$('#content').innerHTML=emptyState('Enter your API key to continue','Use the admin key printed on first boot');}else{$('#content').innerHTML=emptyState('Error '+(e.status||''),fmt.esc(e.msg));toast(e.msg||'Request failed','err');}}
 function openModal(html){$('#modal').innerHTML=html;$('#scrim').classList.add('on');}
 function closeModal(){$('#scrim').classList.remove('on');}
+function confirmModal({title,body,confirmLabel='Confirm',danger=false}){
+  return new Promise(res=>{
+    const scrim=$('#scrim'),prev=scrim.onclick;let done=false;
+    const fin=v=>{if(done)return;done=true;scrim.onclick=prev;closeModal();res(v);};
+    openModal(`<h3>${fmt.esc(title)}</h3><div class="mdsc">${fmt.esc(body)}</div><div class="acts"><button class="btn" id="cm-no">Cancel</button><button class="btn ${danger?'danger fill':'pri'}" id="cm-yes">${fmt.esc(confirmLabel)}</button></div>`);
+    $('#cm-no').onclick=()=>fin(false);$('#cm-yes').onclick=()=>fin(true);
+    scrim.onclick=e=>{if(e.target===scrim)fin(false);};
+  });
+}
+function dropdown(mount,items,initial){
+  let value=initial!=null?initial:(items[0]||'');
+  mount.classList.add('dd');
+  mount.innerHTML=`<button type="button" class="dd-trigger"><span class="dd-val"></span><svg class="dd-caret" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></button><div class="dd-pop" hidden><div class="dd-search"><svg viewBox="0 0 24 24">${ICONS.search}</svg><input type="text" placeholder="Search…" autocomplete="off"></div><div class="dd-list"></div></div>`;
+  const trig=mount.querySelector('.dd-trigger'),val=mount.querySelector('.dd-val'),pop=mount.querySelector('.dd-pop'),search=mount.querySelector('.dd-search input'),list=mount.querySelector('.dd-list');
+  const set=v=>{value=v;val.textContent=v;};set(value);
+  const draw=q=>{const f=q?items.filter(i=>i.toLowerCase().includes(q.toLowerCase())):items;list.innerHTML=f.length?f.slice(0,500).map(i=>`<div class="dd-opt${i===value?' on':''}" data-v="${fmt.esc(i)}">${fmt.esc(i)}</div>`).join(''):'<div class="dd-empty">No matches</div>';list.querySelectorAll('.dd-opt').forEach(o=>o.onclick=()=>{set(o.dataset.v);pop.hidden=true;});};
+  trig.onclick=e=>{e.stopPropagation();const willOpen=pop.hidden;$$('.dd-pop').forEach(p=>p.hidden=true);if(willOpen){pop.hidden=false;search.value='';draw('');search.focus();}};
+  search.onclick=e=>e.stopPropagation();search.oninput=()=>draw(search.value);
+  draw('');
+  return{get value(){return value;},set value(v){set(v);}};
+}
+document.addEventListener('click',e=>{if(!e.target.closest('.dd'))$$('.dd-pop').forEach(p=>p.hidden=true);});
 $('#scrim').onclick=e=>{if(e.target===$('#scrim'))closeModal();};
 function openKeyGate(){
   openModal(`<div class="gate" style="text-align:center"><div class="logo"><svg class="mono-mark" viewBox="0 0 91 91" aria-hidden="true"><rect width="90.3704" height="90.3704" fill="#FF4D00"/><g fill="#fff"><rect x="26.7773" y="13.3877" width="10.0412" height="10.0412"/><rect x="26.7773" y="66.9407" width="10.0412" height="10.0412"/><rect x="53.5508" y="13.3877" width="10.0412" height="10.0412"/><rect x="53.5508" y="66.9407" width="10.0412" height="10.0412"/><rect x="13.3906" y="26.7764" width="10.0412" height="10.0412"/><rect x="13.3906" y="40.1643" width="10.0412" height="10.0412"/><rect x="13.3906" y="53.553" width="10.0412" height="10.0412"/><rect x="40.168" y="13.3877" width="10.0412" height="10.0412"/><rect x="40.168" y="40.1643" width="10.0412" height="10.0412"/><rect x="40.168" y="66.9407" width="10.0412" height="10.0412"/><rect x="66.9414" y="26.7764" width="10.0412" height="10.0412"/><rect x="66.9414" y="40.1643" width="10.0412" height="10.0412"/><rect x="66.9414" y="53.553" width="10.0412" height="10.0412"/></g></svg></div></div><h3 style="text-align:center">Oximy Gateway</h3><div class="mdsc" style="text-align:center">Paste your API key to access the dashboard.</div>
