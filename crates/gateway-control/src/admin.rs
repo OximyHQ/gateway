@@ -20,7 +20,7 @@ use axum::Router;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use gateway_spine::{Clock, RateLimits, Usd, VirtualKey};
 use gateway_telemetry::store::{GroupBy, TimeRange};
 use serde::{Deserialize, Serialize};
@@ -150,6 +150,9 @@ pub struct ProviderInfo {
     id: String,
     configured: bool,
     models_count: u64,
+    /// The egress base URL (not secret). Lets the dashboard pre-fill the edit form.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    base_url: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -205,6 +208,10 @@ pub fn admin_router<C: Clock + 'static>(state: Arc<AppState<C>>) -> Router {
         .route(
             "/v1/admin/providers",
             get(providers::<C>).post(create_provider::<C>),
+        )
+        .route(
+            "/v1/admin/providers/{id}",
+            put(update_provider::<C>).delete(delete_provider::<C>),
         )
         .route("/v1/admin/mcp", get(mcp::<C>))
         .with_state(state)
@@ -571,10 +578,15 @@ async fn providers<C: Clock + 'static>(
                 .into_iter()
                 .filter(|mid| reg.get(mid).is_some_and(|e| e.provider == id))
                 .count() as u64;
+            let base_url = state
+                .providers
+                .get(&id)
+                .and_then(|d| d.credentials.base_url.clone());
             ProviderInfo {
                 id,
                 configured: true,
                 models_count,
+                base_url,
             }
         })
         .collect();
@@ -680,6 +692,101 @@ async fn create_provider<C: Clock + 'static>(
     (
         StatusCode::CREATED,
         Json(CreateProviderResponse { id, base_url }),
+    )
+        .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateProviderRequest {
+    base_url: String,
+    api_key: String,
+}
+
+/// PUT /v1/admin/providers/{id} — update an existing provider's base_url + api_key.
+async fn update_provider<C: Clock + 'static>(
+    State(state): State<Arc<AppState<C>>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<UpdateProviderRequest>,
+) -> Response {
+    match authenticate(state.keys.as_ref(), state.clock.as_ref(), bearer(&headers)) {
+        Ok(_) => {}
+        Err(e) => return e.into_response(),
+    }
+    let base_url = body.base_url.trim().to_string();
+    if base_url.is_empty() || body.api_key.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error":{"message":"base_url and api_key are required","type":"invalid_request_error"}})),
+        )
+            .into_response();
+    }
+    // Update is for an existing provider only (the id keeps its catalog meaning).
+    if state.providers.get(&id).is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error":{"message":format!("provider '{id}' not found"),"type":"invalid_request_error"}})),
+        )
+            .into_response();
+    }
+
+    use gateway_llm::Credentials;
+    use gateway_llm::transports::openai::OpenAi;
+    let deployment = crate::providers::Deployment {
+        provider: Arc::new(OpenAi::new()),
+        credentials: Arc::new(
+            Credentials::new(body.api_key.clone()).with_base_url(base_url.clone()),
+        ),
+    };
+    state.providers.insert(id.clone(), deployment);
+
+    if let Some(persist) = &state.provider_persist {
+        let rp = crate::providers::RuntimeProvider {
+            id: id.clone(),
+            base_url: base_url.clone(),
+            api_key: body.api_key.clone(),
+        };
+        if let Err(e) = persist.persist(&rp) {
+            tracing::warn!(err = %e, provider_id = %id, "failed to persist updated provider");
+        }
+    }
+
+    tracing::info!(provider_id = %id, base_url = %base_url, "provider updated at runtime");
+    (
+        StatusCode::OK,
+        Json(CreateProviderResponse { id, base_url }),
+    )
+        .into_response()
+}
+
+/// DELETE /v1/admin/providers/{id} — remove a provider from the live registry and
+/// from durable storage. (An env-derived provider is removed for this run but
+/// re-registers from its env var on the next boot.)
+async fn delete_provider<C: Clock + 'static>(
+    State(state): State<Arc<AppState<C>>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    match authenticate(state.keys.as_ref(), state.clock.as_ref(), bearer(&headers)) {
+        Ok(_) => {}
+        Err(e) => return e.into_response(),
+    }
+    if !state.providers.remove(&id) {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error":{"message":format!("provider '{id}' not found"),"type":"invalid_request_error"}})),
+        )
+            .into_response();
+    }
+    if let Some(persist) = &state.provider_persist
+        && let Err(e) = persist.remove(&id)
+    {
+        tracing::warn!(err = %e, provider_id = %id, "failed to remove persisted provider");
+    }
+    tracing::info!(provider_id = %id, "provider removed at runtime");
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({"id": id, "removed": true})),
     )
         .into_response()
 }
@@ -1190,6 +1297,88 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         assert!(state.providers.get("Tets").is_none());
+    }
+
+    #[tokio::test]
+    async fn delete_provider_removes_then_404() {
+        let (state, _) = test_state().await;
+        state.providers.insert(
+            "foo",
+            crate::providers::Deployment {
+                provider: Arc::new(gateway_llm::transports::openai::OpenAi::new()),
+                credentials: Arc::new(gateway_llm::Credentials::new("k")),
+            },
+        );
+        let app = admin_router(Arc::clone(&state));
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/v1/admin/providers/foo")
+                    .header("authorization", "Bearer sk-good")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(state.providers.get("foo").is_none());
+
+        let resp2 = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/v1/admin/providers/foo")
+                    .header("authorization", "Bearer sk-good")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp2.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn update_provider_updates_then_404() {
+        let (state, _) = test_state().await;
+        state.providers.insert(
+            "foo",
+            crate::providers::Deployment {
+                provider: Arc::new(gateway_llm::transports::openai::OpenAi::new()),
+                credentials: Arc::new(gateway_llm::Credentials::new("old")),
+            },
+        );
+        let app = admin_router(Arc::clone(&state));
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/v1/admin/providers/foo")
+                    .header("authorization", "Bearer sk-good")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"base_url":"https://new","api_key":"new"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(state.providers.get("foo").is_some());
+
+        let resp2 = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/v1/admin/providers/missing")
+                    .header("authorization", "Bearer sk-good")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"base_url":"x","api_key":"y"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp2.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

@@ -396,6 +396,10 @@ async fn run_up_async(args: UpArgs) -> anyhow::Result<()> {
             });
             self.sf.save(&self.path)
         }
+        fn remove(&self, id: &str) -> anyhow::Result<()> {
+            self.sf.remove_provider(id);
+            self.sf.save(&self.path)
+        }
     }
     state_inner.provider_persist = Some(Arc::new(ProviderFileHook {
         sf: Arc::clone(&sf),

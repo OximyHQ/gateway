@@ -148,6 +148,15 @@ impl StateFile {
             data.providers.push(provider);
         }
     }
+
+    /// Remove a runtime provider by id. Returns `true` if it was present. Does not
+    /// write to disk — the caller persists via [`StateFile::save`].
+    pub fn remove_provider(&self, id: &str) -> bool {
+        let mut data = self.data.lock().unwrap();
+        let before = data.providers.len();
+        data.providers.retain(|p| p.id != id);
+        data.providers.len() != before
+    }
 }
 
 impl crate::firstboot::KeyStore for StateFile {

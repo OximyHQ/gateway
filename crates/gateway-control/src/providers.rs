@@ -61,6 +61,12 @@ impl ProviderRegistry {
         v.sort();
         v
     }
+
+    /// Remove a deployment by id. Returns `true` if it was present. Takes `&self`
+    /// via interior mutability so the admin `DELETE` route can call it at runtime.
+    pub fn remove(&self, provider_id: &str) -> bool {
+        self.by_id.write().unwrap().remove(provider_id).is_some()
+    }
 }
 
 /// A provider added at runtime via the admin API, in the shape the binary
@@ -79,10 +85,17 @@ pub struct RuntimeProvider {
 /// works, it just won't be durable). Kept on `AppState` behind an `Option` so
 /// the control crate has no hard dependency on the file format.
 pub trait ProviderPersist: Send + Sync {
-    /// Persist a newly-registered runtime provider. Best-effort: an `Err` is
-    /// logged by the caller but does not fail the request (the provider is
-    /// already live in memory).
+    /// Persist a newly-registered or updated runtime provider (upsert by id).
+    /// Best-effort: an `Err` is logged by the caller but does not fail the request
+    /// (the provider is already live in memory).
     fn persist(&self, provider: &RuntimeProvider) -> anyhow::Result<()>;
+
+    /// Remove a runtime provider from durable storage by id. Best-effort, same as
+    /// `persist`. A default no-op is provided so non-persisting embeddings need not
+    /// implement it.
+    fn remove(&self, _id: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 #[cfg(test)]

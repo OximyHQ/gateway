@@ -380,7 +380,7 @@ VIEWS.providers={title:'Providers',sub:'',async render(){
   const ps=r.providers||[];
   $('#content').innerHTML=`<div class="pagehd"><div><h2>Providers</h2><p>${ps.filter(p=>p.configured).length} of ${ps.length} configured with credentials.</p></div><div class="hspace" style="flex:1"></div><button class="btn pri" id="newprov"><svg viewBox="0 0 24 24">${ICONS.plus}</svg>Add provider</button></div>
     <div class="grid g3">${ps.map((p,i)=>`<div class="card" style="animation-delay:${i*30}ms"><div class="row" style="justify-content:space-between"><b style="font-size:15px">${fmt.esc(p.id)}</b>${p.configured?'<span class="chip ok"><span class="dot ok"></span>active</span>':'<span class="chip">not set</span>'}</div>
-      <div class="num" style="margin-top:14px;font-size:22px;font-weight:600">${fmt.n(p.models_count)}</div><div class="faint" style="font-size:11.5px">models available</div></div>`).join('')||emptyState('No providers')}</div>`;
+      <div class="num" style="margin-top:14px;font-size:22px;font-weight:600">${fmt.n(p.models_count)}</div><div class="faint" style="font-size:11.5px">models available</div><div class="row" style="gap:8px;margin-top:14px"><button class="btn sm" onclick="editProvider('${fmt.esc(p.id)}','${fmt.esc(p.base_url||'')}')">Edit</button><button class="btn sm danger" onclick="delProvider('${fmt.esc(p.id)}')">Delete</button></div></div>`).join('')||emptyState('No providers')}</div>`;
   $('#newprov').onclick=providerModal;
 }};
 function providerModal(){
@@ -475,6 +475,21 @@ go(location.hash.slice(1)&&VIEWS[location.hash.slice(1)]?location.hash.slice(1):
 if(!KEY)openKeyGate();else refreshCounts();
 setInterval(refreshCounts,20000);
 window.addEventListener('hashchange',()=>{const v=location.hash.slice(1);if(v&&VIEWS[v]&&v!==CUR)go(v);});
+window.editProvider=function(id,base){
+  openModal(`<h3>Edit ${fmt.esc(id)}</h3><div class="mdsc">Update the base URL and API key. The id can't change — it maps to catalog models.</div>
+    <div class="field"><label>Base URL</label><input id="pe-base" value="${fmt.esc(base||'')}" placeholder="https://…" autofocus></div>
+    <div class="field"><label>API key</label><input id="pe-key" type="password" placeholder="sk-… (re-enter to change)"></div>
+    <div class="acts"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn pri" id="pe-save">Save</button></div>`);
+  $('#pe-save').onclick=async()=>{
+    const body={base_url:$('#pe-base').value.trim(),api_key:$('#pe-key').value};
+    if(!body.base_url||!body.api_key){toast('base URL and API key are required','err');return;}
+    try{await api('/v1/admin/providers/'+encodeURIComponent(id),{method:'PUT',body:JSON.stringify(body)});closeModal();toast('Provider updated');go('providers');refreshCounts();}catch(e){toast(e.message||'update failed','err');}
+  };
+};
+window.delProvider=async function(id){
+  if(!confirm(`Delete provider "${id}"? Its models stop working until you re-add it.`))return;
+  try{await api('/v1/admin/providers/'+encodeURIComponent(id),{method:'DELETE'});toast('Provider deleted');go('providers');refreshCounts();}catch(e){toast(e.message||'delete failed','err');}
+};
 window.revokeKey=revokeKey;window.closeModal=closeModal;window.go=go;
 </script>
 </body>
