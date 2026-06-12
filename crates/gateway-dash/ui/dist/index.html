@@ -422,9 +422,12 @@ VIEWS.guardrails={title:'Guardrails',sub:'policy',async render(){
 
 VIEWS.playground={title:'Playground',sub:'',async render(){
   let models=[];try{models=(await api('/v1/models')).body.data||[];}catch(e){return gateOrErr(e);}
-  const pop=['openai/gpt-4o-mini','openai/gpt-4o','anthropic/claude-3.5-haiku','deepseek/deepseek-chat'].filter(id=>models.some(m=>m.id===id));
-  const opts=[...new Set([...pop,...models.map(m=>m.id)])].slice(0,400).map(id=>`<option>${fmt.esc(id)}</option>`).join('');
-  $('#content').innerHTML=`<div class="pagehd"><div><h2>Playground</h2><p>Send a chat completion through the gateway.</p></div></div>
+  let provs=[];try{provs=((await api('/v1/admin/providers')).body.providers||[]).map(p=>p.id);}catch(e){}
+  const provSet=new Set(provs);
+  const callable=models.filter(m=>provSet.has(m.owned_by||m.provider));
+  const pop=['openai/gpt-4o-mini','openai/gpt-4o','anthropic/claude-3.5-haiku','deepseek/deepseek-chat'].filter(id=>callable.some(m=>m.id===id));
+  const opts=[...new Set([...pop,...callable.map(m=>m.id)])].slice(0,1000).map(id=>`<option>${fmt.esc(id)}</option>`).join('');
+  $('#content').innerHTML=`<div class="pagehd"><div><h2>Playground</h2><p>Send a chat completion through the gateway. ${callable.length} of ${models.length} catalog models are callable with your configured providers.</p></div></div>
     <div class="grid g2"><div class="card">
       <div class="field"><label>Model</label><select id="pg-model">${opts}</select></div>
       <div class="field"><label>System (optional)</label><textarea id="pg-sys" style="min-height:54px" placeholder="You are a helpful assistant."></textarea></div>

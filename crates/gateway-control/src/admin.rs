@@ -611,6 +611,42 @@ async fn create_provider<C: Clock + 'static>(
             .into_response();
     }
 
+    // Validate the id against the model catalog. Routing resolves a model to a
+    // provider by the catalog's provider id, so a provider whose id matches no
+    // model (a typo like "Tets", or an arbitrary name) would register as "active"
+    // yet never serve a request. Reject it with guidance instead of creating a
+    // dead provider.
+    let matched = {
+        let reg = state.registry.read().unwrap();
+        reg.ids()
+            .into_iter()
+            .filter(|mid| reg.get(mid).is_some_and(|e| e.provider == id))
+            .count()
+    };
+    if matched == 0 {
+        let mut sample: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        {
+            let reg = state.registry.read().unwrap();
+            for mid in reg.ids() {
+                if let Some(e) = reg.get(&mid) {
+                    sample.insert(e.provider.clone());
+                }
+                if sample.len() >= 6 {
+                    break;
+                }
+            }
+        }
+        let examples = sample.into_iter().collect::<Vec<_>>().join(", ");
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error":{
+                "message": format!("provider id '{id}' matches 0 models in the catalog, so it could never be called. Use a catalog provider id (e.g. {examples})."),
+                "type":"invalid_request_error"
+            }})),
+        )
+            .into_response();
+    }
+
     // Build an OpenAI-compatible deployment (transport + base_url + api_key),
     // exactly as the env-var presets do at boot.
     use gateway_llm::Credentials;
@@ -1100,6 +1136,13 @@ mod tests {
         let (state, _) = test_state().await;
         // Provider not present before the POST.
         assert!(state.providers.get("groq").is_none());
+        // A catalog model under provider "groq" must exist for the id to validate.
+        {
+            let mut g = gpt4o();
+            g.id = "groq/llama-3.1-8b".into();
+            g.provider = "groq".into();
+            state.registry.write().unwrap().insert(g);
+        }
 
         let app = admin_router(Arc::clone(&state));
         let resp = app
@@ -1124,6 +1167,29 @@ mod tests {
 
         // The provider is now live in the registry (hot path can resolve it).
         assert!(state.providers.get("groq").is_some());
+    }
+
+    #[tokio::test]
+    async fn create_provider_unknown_catalog_id_is_400() {
+        // An id that matches no catalog model is rejected (would be a dead provider).
+        let (state, _) = test_state().await;
+        let app = admin_router(Arc::clone(&state));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/providers")
+                    .header("authorization", "Bearer sk-good")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"id":"Tets","base_url":"http://x","api_key":"k"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert!(state.providers.get("Tets").is_none());
     }
 
     #[tokio::test]
