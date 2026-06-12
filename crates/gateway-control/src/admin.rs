@@ -73,6 +73,9 @@ pub struct CreateKeyRequest {
     models: Option<Vec<String>>,
     rpm: Option<i64>,
     tpm: Option<i64>,
+    /// Namespaced MCP tool allowlist (`server__tool`). `None`/absent = all tools
+    /// allowed. Present = the key may call ONLY these tools.
+    tool_allowlist: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -85,6 +88,8 @@ pub struct CreateKeyResponse {
     models: Option<Vec<String>>,
     rpm: Option<i64>,
     tpm: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_allowlist: Option<Vec<String>>,
     revoked: bool,
 }
 
@@ -356,6 +361,13 @@ async fn create_key<C: Clock + 'static>(
     // Register budget in the ledger so requests work immediately.
     state.ledger.set_budget(&key_id, max_budget, Usd::ZERO);
 
+    // Seed the per-key MCP tool allowlist (in-memory federation policy). Absent =
+    // the key stays open to all federated tools.
+    if let Some(allow) = &body.tool_allowlist {
+        let set: std::collections::HashSet<String> = allow.iter().cloned().collect();
+        state.federation.acl_mut().await.set(&key_id, Some(set));
+    }
+
     // Persist to durable store (async, best-effort — log on failure).
     let stored_key = gateway_store::StoredKey {
         id: key_id.clone(),
@@ -391,6 +403,7 @@ async fn create_key<C: Clock + 'static>(
             models: body.models,
             rpm: body.rpm,
             tpm: body.tpm,
+            tool_allowlist: body.tool_allowlist,
             revoked: false,
         }),
     )

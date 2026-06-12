@@ -181,14 +181,26 @@ async fn run_up_async(args: UpArgs) -> anyhow::Result<()> {
         && !api_key.is_empty()
     {
         use gateway_llm::transports::gemini::Gemini;
+        // The models.dev catalog keys Google models under the `google` provider id,
+        // so register the native transport there; keep `gemini` as an alias for any
+        // route/override that uses the friendlier name.
+        let gemini = Arc::new(Gemini::new());
+        let creds = Arc::new(Credentials::new(api_key));
+        providers.insert(
+            "google",
+            Deployment {
+                provider: gemini.clone(),
+                credentials: creds.clone(),
+            },
+        );
         providers.insert(
             "gemini",
             Deployment {
-                provider: Arc::new(Gemini::new()),
-                credentials: Arc::new(Credentials::new(api_key)),
+                provider: gemini,
+                credentials: creds,
             },
         );
-        tracing::info!("provider registered: gemini");
+        tracing::info!("provider registered: google (gemini, native)");
     }
 
     // ── 4b. OpenAI-compatible provider presets ────────────────────────────────

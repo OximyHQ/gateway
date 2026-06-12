@@ -39,6 +39,14 @@ impl Gemini {
     }
 }
 
+/// The Gemini API addresses models by bare id (`gemini-2.0-flash`), but the
+/// models.dev catalog namespaces them under the `google/` provider, so a registry
+/// id like `google/gemini-2.0-flash` arrives here. Strip the provider prefix so the
+/// `generateContent` URL is valid.
+fn gemini_model_path(model: &str) -> &str {
+    model.strip_prefix("google/").unwrap_or(model)
+}
+
 // ---- wire structs (private) ----
 
 #[derive(Serialize)]
@@ -253,7 +261,7 @@ impl Provider for Gemini {
         let url = format!(
             "{}/v1beta/models/{}:generateContent",
             self.base_url(creds),
-            req.model
+            gemini_model_path(&req.model)
         );
         let (system_instruction, contents) = split_messages(&req.messages);
         let generation_config = if req.temperature.is_some() || req.max_tokens.is_some() {
@@ -317,7 +325,7 @@ impl Provider for Gemini {
         let url = format!(
             "{}/v1beta/models/{}:streamGenerateContent",
             self.base_url(creds),
-            req.model
+            gemini_model_path(&req.model)
         );
         let (system_instruction, contents) = split_messages(&req.messages);
         let generation_config = if req.temperature.is_some() || req.max_tokens.is_some() {
@@ -402,5 +410,23 @@ impl Provider for Gemini {
             },
         );
         Ok(Box::pin(out))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::gemini_model_path;
+
+    #[test]
+    fn strips_google_provider_prefix() {
+        assert_eq!(
+            gemini_model_path("google/gemini-2.0-flash"),
+            "gemini-2.0-flash"
+        );
+        assert_eq!(gemini_model_path("gemini-1.5-pro"), "gemini-1.5-pro");
+        assert_eq!(
+            gemini_model_path("gemini-flash-latest"),
+            "gemini-flash-latest"
+        );
     }
 }
