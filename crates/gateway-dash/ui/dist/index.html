@@ -178,7 +178,6 @@ label{font-family:var(--mono);font-size:12px;letter-spacing:.06em;text-transform
   </aside>
   <div id="main">
     <header>
-      <h1 id="title">Overview <span class="sub" id="subtitle"></span></h1>
       <div class="hspace"></div>
       <div class="hstat" id="reqstat"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--acc)" stroke-width="2"><path d="M13 2 3 14h7l-1 8 10-12h-7z"/></svg><span id="reqnum" class="num">—</span> req</div>
       <div class="hstat hkey" id="keychip" title="API key"><span class="dot" id="keydot"></span><span id="keylabel">no key</span></div>
@@ -239,8 +238,7 @@ function renderNav(){
 const VIEWS={};
 let CUR='overview';
 function go(v){CUR=v;location.hash=v;$$('.nav').forEach(n=>n.classList.toggle('on',n.dataset.v===v));
-  $('#title').firstChild.textContent=(VIEWS[v]?.title||v)+' ';
-  $('#subtitle').textContent=VIEWS[v]?.sub||'';
+  document.title=(VIEWS[v]?.title?VIEWS[v].title+' — ':'')+'Oximy Gateway';
   $('#content').innerHTML='<div class="grid g4">'+'<div class="card skeleton" style="height:96px"></div>'.repeat(4)+'</div>';
   VIEWS[v]?.render();
 }
@@ -275,6 +273,7 @@ VIEWS.overview={title:'Overview',sub:'live',async render(){
   let usage=[];try{usage=(await api('/v1/usage?group_by=day')).body.buckets||[];}catch(e){}
   const top=(o.top_models||[]).map(m=>({label:m.model,val:m.cost_usd}));
   $('#content').innerHTML=`
+    <div class="pagehd"><div><h2>Overview</h2><p>Live gateway spend, traffic and configuration at a glance.</p></div></div>
     <div class="grid g6" style="margin-bottom:14px">${stats.map((s,i)=>`
       <div class="card stat ${s[2]}" style="animation-delay:${i*40}ms">
         <div class="k"><svg class="ic" viewBox="0 0 24 24">${s[3]}</svg>${s[0]}</div>
