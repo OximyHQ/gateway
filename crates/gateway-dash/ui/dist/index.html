@@ -19,16 +19,15 @@
   --tx:#1a1a1a; --dim:#525252; --faint:#737373; --ghost:#a3a3a3;
   --acc:#FF4D00; --acc2:#E64500; --acc-dark:#3C1800; --acc-bg:rgba(255,77,0,.1); --acc-ln:rgba(255,77,0,.26); --acc-soft:#FBF4EB;
   --ok:#22c55e; --ok-bg:#f0fdf4; --warn:#f59e0b; --warn-bg:#fffbeb;
-  --err:#ef4444; --err-bg:#fef2f2; --info:#3b82f6; --info-bg:#eff6ff;
+  --err:#ef4444; --err-bg:#fef2f2;
   --violet:#a87c9f; --violet-bg:rgba(168,124,159,.12);
-  --viz-1:#FF4D00; --viz-2:#5778a4; --viz-3:#a87c9f; --viz-4:#85b6b2; --viz-5:#e7ca60; --viz-6:#6a9f58; --viz-7:#967662;
   --sh-sm:0 1px 2px 0 rgb(0 0 0/.05); --sh:0 4px 6px -1px rgb(0 0 0/.1),0 2px 4px -2px rgb(0 0 0/.1);
   --sh-md:0 10px 15px -3px rgb(0 0 0/.1),0 4px 6px -4px rgb(0 0 0/.1);
-  --ring:0 0 0 2px #FF4D00,0 0 0 4px rgba(255,77,0,.15);
+  --ring:0 0 0 2px var(--acc),0 0 0 4px rgba(255,77,0,.15);
   --mono:ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,monospace;
   --display:'PPMondwest','Delight',system-ui,sans-serif;
   --sans:'Delight','Hanken Grotesk',system-ui,-apple-system,'Segoe UI',sans-serif;
-  --ease:cubic-bezier(.16,1,.3,1); --r:6px; --r2:8px; --sb:248px;
+  --ease:cubic-bezier(.16,1,.3,1); --r2:8px; --sb:248px;
 }
 *{box-sizing:border-box;margin:0;padding:0}
 html,body{height:100%}
@@ -98,9 +97,9 @@ nav{padding:8px 12px;flex:1;overflow-y:auto}
 .stat .v{font-family:var(--display);font-size:clamp(16px,1.5vw,24px);font-weight:600;letter-spacing:0;margin-top:11px;line-height:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-variant-numeric:tabular-nums}
 .stat .ic{width:15px;height:15px;stroke:var(--acc);fill:none;stroke-width:1.8}
 .chip{display:inline-flex;align-items:center;gap:6px;font-family:var(--mono);font-size:12px;padding:2px 9px;border-radius:4px;border:1px solid var(--line2);color:var(--dim);background:var(--bg1);white-space:nowrap}
-.chip.ok{color:var(--ok);border-color:rgba(22,163,74,.25);background:var(--ok-bg)}
-.chip.warn{color:var(--warn);border-color:rgba(217,119,6,.25);background:var(--warn-bg)}
-.chip.bad{color:var(--err);border-color:rgba(220,38,38,.25);background:var(--err-bg)}
+.chip.ok{color:var(--ok);border-color:rgba(34,197,94,.25);background:var(--ok-bg)}
+.chip.warn{color:var(--warn);border-color:rgba(245,158,11,.25);background:var(--warn-bg)}
+.chip.bad{color:var(--err);border-color:rgba(239,68,68,.25);background:var(--err-bg)}
 .chip.v{color:var(--violet);border-color:rgba(168,124,159,.28);background:var(--violet-bg)}
 h3.sec{font-family:var(--display);font-size:14px;font-weight:600;color:var(--tx);margin-bottom:14px;display:flex;align-items:center;gap:10px}
 h3.sec::after{content:"";flex:1;height:1px;background:linear-gradient(90deg,var(--line2),transparent)}
@@ -135,7 +134,7 @@ label{font-family:var(--mono);font-size:12px;letter-spacing:.06em;text-transform
 .btn.pri{background:var(--acc);color:#fff;border-color:transparent;box-shadow:var(--sh-sm)}
 .btn.pri:hover{background:var(--acc2)}
 .btn.sm{padding:6px 11px;font-size:12px}
-.btn.danger{color:var(--err);border-color:rgba(220,38,38,.25)} .btn.danger:hover{background:var(--err-bg)}
+.btn.danger{color:var(--err);border-color:rgba(239,68,68,.25)} .btn.danger:hover{background:var(--err-bg)}
 .btn svg{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:1.8}
 .field{margin-bottom:14px}
 .searchbox{position:relative;max-width:340px}
@@ -161,7 +160,7 @@ label{font-family:var(--mono);font-size:12px;letter-spacing:.06em;text-transform
 .skeleton{background:linear-gradient(90deg,var(--bg1),var(--bg2),var(--bg1));background-size:200% 100%;animation:sk 1.3s infinite;border-radius:6px;color:transparent}
 @keyframes sk{to{background-position:-200% 0}}
 .cap{display:inline-flex;gap:4px}.cap b{font-family:var(--mono);font-size:11px;font-weight:400;padding:0 6px;border-radius:4px;background:var(--bg2);color:var(--faint);border:1px solid var(--line)}
-.cap b.on{color:var(--ok);border-color:rgba(22,163,74,.25);background:var(--ok-bg)}
+.cap b.on{color:var(--ok);border-color:rgba(34,197,94,.25);background:var(--ok-bg)}
 @media(max-width:1000px){#app{grid-template-columns:1fr}#side{display:none}.g6,.g4{grid-template-columns:repeat(2,1fr)}.g3,.g2{grid-template-columns:1fr}}
 </style>
 </head>
