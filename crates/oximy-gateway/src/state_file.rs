@@ -71,9 +71,25 @@ impl From<&PersistedKey> for VirtualKey {
     }
 }
 
+/// A provider added at runtime via the admin API (`POST /v1/admin/providers`).
+/// Stored verbatim so it can be re-registered as an OpenAI-compatible deployment
+/// on the next boot. The api_key lives here only because the gateway must replay
+/// it to the upstream; the file is the operator's responsibility to protect,
+/// same as it already is for key hashes.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct StoredProvider {
+    pub id: String,
+    pub base_url: String,
+    pub api_key: String,
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct StateFileData {
     pub keys: HashMap<String, PersistedKey>,
+    /// Runtime-added providers (admin API). `#[serde(default)]` so older state
+    /// files without this field still load.
+    #[serde(default)]
+    pub providers: Vec<StoredProvider>,
 }
 
 /// In-memory view of the JSON state file, implementing `firstboot::KeyStore`.
@@ -115,6 +131,22 @@ impl StateFile {
             .values()
             .map(VirtualKey::from)
             .collect()
+    }
+
+    /// Return all runtime-added providers for re-registration at boot.
+    pub fn load_providers(&self) -> Vec<StoredProvider> {
+        self.data.lock().unwrap().providers.clone()
+    }
+
+    /// Add (or replace, by id) a runtime provider. Does not write to disk — the
+    /// caller persists via [`StateFile::save`].
+    pub fn insert_provider(&self, provider: StoredProvider) {
+        let mut data = self.data.lock().unwrap();
+        if let Some(existing) = data.providers.iter_mut().find(|p| p.id == provider.id) {
+            *existing = provider;
+        } else {
+            data.providers.push(provider);
+        }
     }
 }
 

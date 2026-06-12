@@ -463,7 +463,7 @@ impl Gateway {
                 })
             })?
         };
-        let deployment = state.providers.get(&provider_id).cloned().ok_or_else(|| {
+        let deployment = state.providers.get(&provider_id).ok_or_else(|| {
             GatewayError::BadRequest(format!("no egress configured for provider {provider_id}"))
         })?;
 
@@ -806,7 +806,7 @@ mod tests {
     async fn state_with(provider: Arc<MockProvider>, budget: Option<Usd>) -> AppState<MockClock> {
         let mut ks = StaticKeyStore::new();
         ks.insert(key(budget, None, RateLimits::default()));
-        let mut providers = ProviderRegistry::new();
+        let providers = ProviderRegistry::new();
         providers.insert(
             "openai",
             Deployment {
@@ -846,7 +846,7 @@ mod tests {
     ) -> AppState<MockClock> {
         let mut ks = StaticKeyStore::new();
         ks.insert(key(budget, None, RateLimits::default()));
-        let mut providers = ProviderRegistry::new();
+        let providers = ProviderRegistry::new();
         providers.insert(
             "openai",
             Deployment {
@@ -1093,7 +1093,7 @@ mod tests {
             None,
             RateLimits::default(),
         ));
-        let mut providers = ProviderRegistry::new();
+        let providers = ProviderRegistry::new();
         providers.insert(
             "openai",
             Deployment {
@@ -1188,7 +1188,7 @@ mod tests {
             None,
             RateLimits::default(),
         ));
-        let mut providers = ProviderRegistry::new();
+        let providers = ProviderRegistry::new();
         let usage = TokenUsage {
             input_tokens: 1000,
             output_tokens: 500,
@@ -1297,7 +1297,7 @@ mod tests {
             None,
             RateLimits::default(),
         ));
-        let mut providers = ProviderRegistry::new();
+        let providers = ProviderRegistry::new();
         let usage = TokenUsage {
             input_tokens: 1000,
             output_tokens: 500,
@@ -1439,7 +1439,7 @@ mod tests {
             None,
             RateLimits::default(),
         ));
-        let mut providers = ProviderRegistry::new();
+        let providers = ProviderRegistry::new();
         providers.insert(
             "primary",
             Deployment {

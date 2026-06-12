@@ -157,6 +157,22 @@ pub struct ProvidersResponse {
     providers: Vec<ProviderInfo>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct CreateProviderRequest {
+    /// Provider id (the value used by `ModelEntry.provider` and route targets).
+    id: String,
+    /// OpenAI-compatible base URL, e.g. `https://api.groq.com/openai`.
+    base_url: String,
+    /// Upstream API key (sent as the bearer credential to the provider).
+    api_key: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CreateProviderResponse {
+    id: String,
+    base_url: String,
+}
+
 #[derive(Debug, Serialize)]
 pub struct McpToolInfo {
     name: String,
@@ -186,7 +202,10 @@ pub fn admin_router<C: Clock + 'static>(state: Arc<AppState<C>>) -> Router {
         .route("/v1/admin/keys/{id}/revoke", post(revoke_key::<C>))
         .route("/v1/usage", get(usage::<C>))
         .route("/v1/admin/logs", get(logs::<C>))
-        .route("/v1/admin/providers", get(providers::<C>))
+        .route(
+            "/v1/admin/providers",
+            get(providers::<C>).post(create_provider::<C>),
+        )
         .route("/v1/admin/mcp", get(mcp::<C>))
         .with_state(state)
 }
@@ -566,6 +585,69 @@ async fn providers<C: Clock + 'static>(
     .into_response()
 }
 
+/// POST /v1/admin/providers
+///
+/// Add (or replace) an OpenAI-compatible egress provider at runtime. The new
+/// provider is live for the very next request that routes to it; if the binary
+/// installed a persistence hook (`AppState.provider_persist`), it also survives
+/// a restart. Mirrors `create_key`: same bearer auth, returns 201 on success.
+async fn create_provider<C: Clock + 'static>(
+    State(state): State<Arc<AppState<C>>>,
+    headers: HeaderMap,
+    Json(body): Json<CreateProviderRequest>,
+) -> Response {
+    match authenticate(state.keys.as_ref(), state.clock.as_ref(), bearer(&headers)) {
+        Ok(_) => {}
+        Err(e) => return e.into_response(),
+    }
+
+    let id = body.id.trim().to_string();
+    let base_url = body.base_url.trim().to_string();
+    if id.is_empty() || base_url.is_empty() || body.api_key.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error":{"message":"id, base_url and api_key are required","type":"invalid_request_error"}})),
+        )
+            .into_response();
+    }
+
+    // Build an OpenAI-compatible deployment (transport + base_url + api_key),
+    // exactly as the env-var presets do at boot.
+    use gateway_llm::Credentials;
+    use gateway_llm::transports::openai::OpenAi;
+    let deployment = crate::providers::Deployment {
+        provider: Arc::new(OpenAi::new()),
+        credentials: Arc::new(
+            Credentials::new(body.api_key.clone()).with_base_url(base_url.clone()),
+        ),
+    };
+
+    // Register at runtime (interior mutability — no &mut needed).
+    state.providers.insert(id.clone(), deployment);
+
+    // Persist so it survives a restart, if the binary wired a hook. Best-effort:
+    // the provider is already live in memory, so a persist failure is logged but
+    // does not fail the request.
+    if let Some(persist) = &state.provider_persist {
+        let rp = crate::providers::RuntimeProvider {
+            id: id.clone(),
+            base_url: base_url.clone(),
+            api_key: body.api_key.clone(),
+        };
+        if let Err(e) = persist.persist(&rp) {
+            tracing::warn!(err = %e, provider_id = %id, "failed to persist runtime provider");
+        }
+    }
+
+    tracing::info!(provider_id = %id, base_url = %base_url, "provider registered at runtime");
+
+    (
+        StatusCode::CREATED,
+        Json(CreateProviderResponse { id, base_url }),
+    )
+        .into_response()
+}
+
 /// GET /v1/admin/mcp
 async fn mcp<C: Clock + 'static>(
     State(state): State<Arc<AppState<C>>>,
@@ -716,7 +798,7 @@ mod tests {
             parent_id: None,
         });
 
-        let mut providers = ProviderRegistry::new();
+        let providers = ProviderRegistry::new();
         providers.insert(
             "openai",
             Deployment {
@@ -1011,6 +1093,76 @@ mod tests {
         assert!(!providers.is_empty());
         assert_eq!(providers[0]["id"], "openai");
         assert_eq!(providers[0]["configured"], true);
+    }
+
+    #[tokio::test]
+    async fn create_provider_returns_201_and_registers_at_runtime() {
+        let (state, _) = test_state().await;
+        // Provider not present before the POST.
+        assert!(state.providers.get("groq").is_none());
+
+        let app = admin_router(Arc::clone(&state));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/providers")
+                    .header("authorization", "Bearer sk-good")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"id":"groq","base_url":"https://api.groq.com/openai","api_key":"sk-up"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let bytes = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["id"], "groq");
+        assert_eq!(v["base_url"], "https://api.groq.com/openai");
+
+        // The provider is now live in the registry (hot path can resolve it).
+        assert!(state.providers.get("groq").is_some());
+    }
+
+    #[tokio::test]
+    async fn create_provider_unauthenticated_is_401() {
+        let (state, _) = test_state().await;
+        let app = admin_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/providers")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"id":"groq","base_url":"https://x","api_key":"k"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn create_provider_missing_fields_is_400() {
+        let (state, _) = test_state().await;
+        let app = admin_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/providers")
+                    .header("authorization", "Bearer sk-good")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"id":"","base_url":"","api_key":""}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     // ── mcp ────────────────────────────────────────────────────────────────

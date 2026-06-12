@@ -123,7 +123,10 @@ async fn run_up_async(args: UpArgs) -> anyhow::Result<()> {
     ks.seed(sf.load_keys());
 
     // ── 4. Register LLM providers from env vars ───────────────────────────────
-    let mut providers = ProviderRegistry::new();
+    // Interior mutability: `insert` takes `&self`, so the registry need not be
+    // `mut` and can be shared (the admin `POST /v1/admin/providers` route mutates
+    // it at runtime through the same seam).
+    let providers = ProviderRegistry::new();
 
     // OpenAI native
     if let Ok(api_key) = std::env::var("OPENAI_API_KEY")
@@ -205,48 +208,64 @@ async fn run_up_async(args: UpArgs) -> anyhow::Result<()> {
 
     // ── 4b. OpenAI-compatible provider presets ────────────────────────────────
     register_compat_provider(
-        &mut providers,
+        &providers,
         "GROQ_API_KEY",
         "groq",
         "https://api.groq.com/openai",
     );
     register_compat_provider(
-        &mut providers,
+        &providers,
         "TOGETHER_API_KEY",
         "together",
         "https://api.together.xyz",
     );
     register_compat_provider(
-        &mut providers,
+        &providers,
         "FIREWORKS_API_KEY",
         "fireworks",
         "https://api.fireworks.ai/inference",
     );
     register_compat_provider(
-        &mut providers,
+        &providers,
         "DEEPSEEK_API_KEY",
         "deepseek",
         "https://api.deepseek.com",
     );
-    register_compat_provider(&mut providers, "XAI_API_KEY", "xai", "https://api.x.ai");
+    register_compat_provider(&providers, "XAI_API_KEY", "xai", "https://api.x.ai");
     register_compat_provider(
-        &mut providers,
+        &providers,
         "MISTRAL_API_KEY",
         "mistral",
         "https://api.mistral.ai",
     );
     register_compat_provider(
-        &mut providers,
+        &providers,
         "PERPLEXITY_API_KEY",
         "perplexity",
         "https://api.perplexity.ai",
     );
     register_compat_provider(
-        &mut providers,
+        &providers,
         "CEREBRAS_API_KEY",
         "cerebras",
         "https://api.cerebras.ai",
     );
+
+    // ── 4c. Re-register providers persisted by the admin API at runtime ───────
+    // These were added via `POST /v1/admin/providers` in a previous run and are
+    // stored in the JSON state file. Each is an OpenAI-compatible deployment.
+    for sp in sf.load_providers() {
+        providers.insert(
+            sp.id.clone(),
+            Deployment {
+                provider: Arc::new(OpenAi::new()),
+                credentials: Arc::new(
+                    Credentials::new(sp.api_key.clone()).with_base_url(sp.base_url.clone()),
+                ),
+            },
+        );
+        tracing::info!(provider_id = %sp.id, base_url = %sp.base_url, "provider re-registered from state file");
+    }
 
     if providers.is_empty() {
         eprintln!(
@@ -356,6 +375,32 @@ async fn run_up_async(args: UpArgs) -> anyhow::Result<()> {
 
     // ── 6b. Wire the L1 in-memory cache into AppState ────────────────────────
     state_inner.cache = Some(memory_cache_handle(SystemClock, 3600));
+
+    // ── 6b2. Wire the runtime-provider persistence hook ──────────────────────
+    // When the admin `POST /v1/admin/providers` route adds a provider, this hook
+    // writes it into the JSON state file so it survives a restart (re-registered
+    // in §4c above on the next boot).
+    struct ProviderFileHook {
+        sf: Arc<state_file::StateFile>,
+        path: std::path::PathBuf,
+    }
+    impl gateway_control::providers::ProviderPersist for ProviderFileHook {
+        fn persist(
+            &self,
+            provider: &gateway_control::providers::RuntimeProvider,
+        ) -> anyhow::Result<()> {
+            self.sf.insert_provider(state_file::StoredProvider {
+                id: provider.id.clone(),
+                base_url: provider.base_url.clone(),
+                api_key: provider.api_key.clone(),
+            });
+            self.sf.save(&self.path)
+        }
+    }
+    state_inner.provider_persist = Some(Arc::new(ProviderFileHook {
+        sf: Arc::clone(&sf),
+        path: state_path.clone(),
+    }));
 
     let state = Arc::new(state_inner);
 
@@ -485,7 +530,7 @@ async fn run_up_async(args: UpArgs) -> anyhow::Result<()> {
 
 /// Register an OpenAI-compatible provider when the given env key is set.
 fn register_compat_provider(
-    providers: &mut gateway_control::providers::ProviderRegistry,
+    providers: &gateway_control::providers::ProviderRegistry,
     env_key: &str,
     provider_id: &'static str,
     base_url: &'static str,
@@ -639,6 +684,13 @@ async fn register_mcp_servers<C: gateway_spine::Clock + 'static>(
         command: Option<String>,
         #[serde(default)]
         args: Vec<String>,
+        /// Custom headers applied to every outbound request for url servers.
+        #[serde(default)]
+        headers: std::collections::HashMap<String, String>,
+        /// Convenience: if set (and no explicit Authorization header given),
+        /// adds `Authorization: Bearer <token>`.
+        #[serde(default)]
+        token: Option<String>,
     }
 
     let cfgs: Vec<McpServerCfg> = match serde_json::from_str(raw) {
@@ -651,9 +703,24 @@ async fn register_mcp_servers<C: gateway_spine::Clock + 'static>(
 
     for cfg in cfgs {
         let server = if let Some(url) = cfg.url {
+            // Collect custom headers, then inject a Bearer token if `token` is
+            // set and no Authorization header was provided explicitly.
+            let mut headers: Vec<(String, String)> = cfg
+                .headers
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            let has_auth = headers
+                .iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case("authorization"));
+            if let Some(token) = cfg.token.as_ref()
+                && !has_auth
+            {
+                headers.push(("Authorization".to_string(), format!("Bearer {token}")));
+            }
             McpServer::new(
                 cfg.name.clone(),
-                Arc::new(HttpTransport::new(cfg.name.clone(), url)),
+                Arc::new(HttpTransport::with_headers(cfg.name.clone(), url, headers)),
             )
         } else if let Some(command) = cfg.command {
             let mut cmd = tokio::process::Command::new(&command);

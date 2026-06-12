@@ -157,15 +157,30 @@ impl McpTransport for StdioTransport {
 pub struct HttpTransport {
     label: String,
     endpoint: String,
+    /// Extra headers applied to every outbound JSON-RPC request (in addition to
+    /// the standard content-type/accept). Used to carry upstream auth such as
+    /// `Authorization: Bearer <token>` for token-authenticated servers (Linear).
+    headers: Vec<(String, String)>,
     client: reqwest::Client,
     next_id: Mutex<i64>,
 }
 
 impl HttpTransport {
     pub fn new(label: impl Into<String>, endpoint: impl Into<String>) -> Self {
+        Self::with_headers(label, endpoint, Vec::new())
+    }
+
+    /// Like [`HttpTransport::new`] but attaches `headers` to every outbound
+    /// request. Static header/token injection only — no OAuth flow.
+    pub fn with_headers(
+        label: impl Into<String>,
+        endpoint: impl Into<String>,
+        headers: Vec<(String, String)>,
+    ) -> Self {
         Self {
             label: label.into(),
             endpoint: endpoint.into(),
+            headers,
             client: reqwest::Client::new(),
             next_id: Mutex::new(1),
         }
@@ -188,11 +203,15 @@ impl McpTransport for HttpTransport {
         req.id = RequestId::Num(id);
         debug!(transport = %self.label, method = %req.method, id, "http call");
 
-        let resp = self
+        let mut builder = self
             .client
             .post(&self.endpoint)
             .header("Content-Type", "application/json")
-            .header("Accept", "application/json, text/event-stream")
+            .header("Accept", "application/json, text/event-stream");
+        for (name, value) in &self.headers {
+            builder = builder.header(name, value);
+        }
+        let resp = builder
             .json(&req)
             .send()
             .await
@@ -286,5 +305,29 @@ pub mod mock {
                 )),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod http_header_tests {
+    use super::*;
+
+    #[test]
+    fn new_has_no_extra_headers() {
+        let t = HttpTransport::new("linear", "https://example.test/mcp");
+        assert!(t.headers.is_empty());
+        assert_eq!(t.label(), "linear");
+    }
+
+    #[test]
+    fn with_headers_carries_auth() {
+        let headers = vec![(
+            "Authorization".to_string(),
+            "Bearer secret-token".to_string(),
+        )];
+        let t = HttpTransport::with_headers("linear", "https://example.test/mcp", headers);
+        assert_eq!(t.headers.len(), 1);
+        assert_eq!(t.headers[0].0, "Authorization");
+        assert_eq!(t.headers[0].1, "Bearer secret-token");
     }
 }

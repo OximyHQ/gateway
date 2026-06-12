@@ -98,7 +98,7 @@ async fn build_state() -> Arc<AppState<MockClock>> {
         revoked: false,
         parent_id: None,
     });
-    let mut providers = ProviderRegistry::new();
+    let providers = ProviderRegistry::new();
     providers.insert(
         "openai",
         Deployment {

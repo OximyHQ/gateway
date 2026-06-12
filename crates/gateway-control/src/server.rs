@@ -621,7 +621,7 @@ mod tests {
             revoked: false,
             parent_id: None,
         });
-        let mut providers = ProviderRegistry::new();
+        let providers = ProviderRegistry::new();
         providers.insert(
             "openai",
             Deployment {
@@ -661,7 +661,7 @@ mod tests {
             revoked: false,
             parent_id: None,
         });
-        let mut providers = ProviderRegistry::new();
+        let providers = ProviderRegistry::new();
         providers.insert(
             "openai",
             Deployment {
@@ -924,7 +924,7 @@ mod tests {
             revoked: false,
             parent_id: None,
         });
-        let mut providers = ProviderRegistry::new();
+        let providers = ProviderRegistry::new();
         providers.insert(
             "openai",
             Deployment {

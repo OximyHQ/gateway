@@ -5,7 +5,7 @@
 //! provider id.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use gateway_llm::{Credentials, Provider};
 
@@ -16,9 +16,15 @@ pub struct Deployment {
     pub credentials: Arc<Credentials>,
 }
 
-#[derive(Default, Clone)]
+/// Maps provider ids to their live egress deployment. Uses interior mutability
+/// (`RwLock`) so the registry can be mutated at runtime (e.g. the admin
+/// `POST /v1/admin/providers` route) while every reader keeps an `&self`
+/// signature and the hot path stays lock-friendly (a single short read lock per
+/// lookup). `get` returns an owned `Deployment` (two cheap `Arc` clones) because
+/// the value cannot outlive the read guard.
+#[derive(Default)]
 pub struct ProviderRegistry {
-    by_id: HashMap<String, Deployment>,
+    by_id: RwLock<HashMap<String, Deployment>>,
 }
 
 impl ProviderRegistry {
@@ -26,28 +32,57 @@ impl ProviderRegistry {
         Self::default()
     }
 
-    pub fn insert(&mut self, provider_id: impl Into<String>, deployment: Deployment) {
-        self.by_id.insert(provider_id.into(), deployment);
+    /// Register (or replace) a deployment for `provider_id`. Takes `&self` via
+    /// interior mutability so it can be called at runtime on a shared registry.
+    pub fn insert(&self, provider_id: impl Into<String>, deployment: Deployment) {
+        self.by_id
+            .write()
+            .unwrap()
+            .insert(provider_id.into(), deployment);
     }
 
-    pub fn get(&self, provider_id: &str) -> Option<&Deployment> {
-        self.by_id.get(provider_id)
+    /// Look up the deployment for `provider_id`, returning an owned clone (cheap:
+    /// two `Arc`s) so the result is independent of the read lock.
+    pub fn get(&self, provider_id: &str) -> Option<Deployment> {
+        self.by_id.read().unwrap().get(provider_id).cloned()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.by_id.is_empty()
+        self.by_id.read().unwrap().is_empty()
     }
 
     pub fn count(&self) -> usize {
-        self.by_id.len()
+        self.by_id.read().unwrap().len()
     }
 
     /// Sorted list of all registered provider ids.
     pub fn all_ids(&self) -> Vec<String> {
-        let mut v: Vec<String> = self.by_id.keys().cloned().collect();
+        let mut v: Vec<String> = self.by_id.read().unwrap().keys().cloned().collect();
         v.sort();
         v
     }
+}
+
+/// A provider added at runtime via the admin API, in the shape the binary
+/// persists to its JSON state file. The credentials build an OpenAI-compatible
+/// deployment (`base_url` + `api_key`) on the next boot.
+#[derive(Clone, Debug)]
+pub struct RuntimeProvider {
+    pub id: String,
+    pub base_url: String,
+    pub api_key: String,
+}
+
+/// Persistence seam for runtime-added providers. The binary implements this to
+/// write the provider into its state file so it survives a restart; tests and
+/// library-only embeddings can leave it `None` (runtime registration still
+/// works, it just won't be durable). Kept on `AppState` behind an `Option` so
+/// the control crate has no hard dependency on the file format.
+pub trait ProviderPersist: Send + Sync {
+    /// Persist a newly-registered runtime provider. Best-effort: an `Err` is
+    /// logged by the caller but does not fail the request (the provider is
+    /// already live in memory).
+    fn persist(&self, provider: &RuntimeProvider) -> anyhow::Result<()>;
 }
 
 #[cfg(test)]
@@ -93,7 +128,7 @@ mod tests {
 
     #[test]
     fn lookup_by_provider_id() {
-        let mut r = ProviderRegistry::new();
+        let r = ProviderRegistry::new();
         r.insert(
             "openai",
             Deployment {

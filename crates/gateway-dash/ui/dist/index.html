@@ -378,10 +378,25 @@ function drawModels(){
 VIEWS.providers={title:'Providers',sub:'',async render(){
   let r;try{r=(await api('/v1/admin/providers')).body;}catch(e){return gateOrErr(e);}
   const ps=r.providers||[];
-  $('#content').innerHTML=`<div class="pagehd"><div><h2>Providers</h2><p>${ps.filter(p=>p.configured).length} of ${ps.length} configured with credentials.</p></div></div>
+  $('#content').innerHTML=`<div class="pagehd"><div><h2>Providers</h2><p>${ps.filter(p=>p.configured).length} of ${ps.length} configured with credentials.</p></div><div class="hspace" style="flex:1"></div><button class="btn pri" id="newprov"><svg viewBox="0 0 24 24">${ICONS.plus}</svg>Add provider</button></div>
     <div class="grid g3">${ps.map((p,i)=>`<div class="card" style="animation-delay:${i*30}ms"><div class="row" style="justify-content:space-between"><b style="font-size:15px">${fmt.esc(p.id)}</b>${p.configured?'<span class="chip ok"><span class="dot ok"></span>active</span>':'<span class="chip">not set</span>'}</div>
       <div class="num" style="margin-top:14px;font-size:22px;font-weight:600">${fmt.n(p.models_count)}</div><div class="faint" style="font-size:11.5px">models available</div></div>`).join('')||emptyState('No providers')}</div>`;
+  $('#newprov').onclick=providerModal;
 }};
+function providerModal(){
+  openModal(`<h3>Add provider</h3><div class="mdsc">Register an OpenAI-compatible provider. Active immediately and persisted across restarts.</div>
+    <div class="field"><label>Provider id</label><input id="p-id" placeholder="e.g. groq" autofocus></div>
+    <div class="field"><label>Base URL</label><input id="p-base" placeholder="https://api.groq.com/openai"></div>
+    <div class="field"><label>API key</label><input id="p-key" type="password" placeholder="sk-…"></div>
+    <div class="acts"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn pri" id="p-create">Add provider</button></div>`);
+  $('#p-create').onclick=async()=>{
+    const body={id:$('#p-id').value.trim(),base_url:$('#p-base').value.trim(),api_key:$('#p-key').value};
+    if(!body.id||!body.base_url||!body.api_key){toast('id, base URL and API key are required','err');return;}
+    try{await api('/v1/admin/providers',{method:'POST',body:JSON.stringify(body)});
+      closeModal();toast('Provider added');go('providers');refreshCounts();
+    }catch(e){toast('Add failed: '+e.msg,'err');}
+  };
+}
 
 VIEWS.mcp={title:'MCP Servers',sub:'tool federation',async render(){
   let r;try{r=(await api('/v1/admin/mcp')).body;}catch(e){return gateOrErr(e);}

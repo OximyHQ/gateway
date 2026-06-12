@@ -22,7 +22,7 @@ pub use gateway_telemetry::{DEFAULT_CHANNEL_CAPACITY, TelemetryWriter};
 use crate::cache_handle::CacheHandle;
 use crate::guard::default_chain;
 use crate::keystore::KeyStore;
-use crate::providers::ProviderRegistry;
+use crate::providers::{ProviderPersist, ProviderRegistry};
 
 /// Concrete clock type the rate limiter is parameterized on for the server.
 /// `Arc<C>: Clock` (from the spine blanket impl), so `RateLimiter<Arc<C>>`
@@ -35,6 +35,11 @@ pub struct AppState<C: Clock = SystemClock> {
     pub limiter: Arc<RateLimiter<Arc<C>>>,
     pub keys: Arc<dyn KeyStore>,
     pub providers: ProviderRegistry,
+    /// Optional persistence seam for providers added at runtime via
+    /// `POST /v1/admin/providers`. `None` (the default) means runtime
+    /// registration is in-memory only; the binary installs a hook that writes
+    /// the JSON state file so added providers survive a restart.
+    pub provider_persist: Option<Arc<dyn ProviderPersist>>,
     /// The content-guard chain run at `PreRequest` (over the prompt) and
     /// `PostResponse` (over the completion). Blocks secrets, masks PII by default.
     pub guard: Arc<GuardChain>,
@@ -130,6 +135,7 @@ impl<C: Clock> AppState<C> {
             limiter,
             keys,
             providers,
+            provider_persist: None,
             guard,
             routes: RwLock::new(HashMap::new()),
             audit,
